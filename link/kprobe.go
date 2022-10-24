@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/internal/sys"
 	"github.com/cilium/ebpf/internal/unix"
+	linux "golang.org/x/sys/unix"
 )
 
 var (
@@ -27,6 +28,7 @@ type probeArgs struct {
 	offset, refCtrOffset, cookie uint64
 	pid                          int
 	ret                          bool
+	unwind_stack                 bool
 }
 
 // KprobeOptions defines additional parameters that will be used
@@ -286,6 +288,12 @@ func pmuProbe(typ probeType, args probeArgs) (*perfEvent, error) {
 			Ext1:   uint64(uintptr(sp)), // Uprobe path
 			Ext2:   args.offset,         // Uprobe offset
 			Config: config,              // RefCtrOffset, Retprobe flag
+		}
+		if args.unwind_stack {
+			attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
+			attr.Sample_stack_user = 16384
+			attr.Sample_regs_user = (1 << 33) - 1
+			attr.Size = uint32(unsafe.Sizeof(attr))
 		}
 	}
 

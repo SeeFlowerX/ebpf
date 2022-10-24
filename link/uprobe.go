@@ -69,7 +69,8 @@ type UprobeOptions struct {
 	// via `bpf_get_attach_cookie()`.
 	//
 	// Needs kernel 5.15+.
-	Cookie uint64
+	Cookie      uint64
+	UnwindStack bool
 }
 
 // To open a new Executable, use:
@@ -289,6 +290,7 @@ func (ex *Executable) uprobe(symbol string, prog *ebpf.Program, opts *UprobeOpti
 		refCtrOffset: opts.RefCtrOffset,
 		ret:          ret,
 		cookie:       opts.Cookie,
+		unwind_stack: opts.UnwindStack,
 	}
 
 	// Use uprobe PMU if the kernel has it available.

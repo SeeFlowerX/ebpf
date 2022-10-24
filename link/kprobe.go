@@ -390,7 +390,7 @@ func tracefsProbe(typ probeType, args probeArgs) (_ *perfEvent, err error) {
 	}
 
 	// Kprobes are ephemeral tracepoints and share the same perf event type.
-	fd, err := openTracepointPerfEvent(tid, args.pid)
+	fd, err := openTracepointPerfEvent(tid, args.pid, false)
 	if err != nil {
 		return nil, err
 	}

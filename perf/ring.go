@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf/internal/unix"
+	linux "golang.org/x/sys/unix"
 )
 
 // perfEventRing is a page of metadata followed by
@@ -22,12 +23,12 @@ type perfEventRing struct {
 	*ringReader
 }
 
-func newPerfEventRing(cpu, perCPUBuffer, watermark int) (*perfEventRing, error) {
+func newPerfEventRing(cpu, perCPUBuffer, watermark int, unwind_stack bool) (*perfEventRing, error) {
 	if watermark >= perCPUBuffer {
 		return nil, errors.New("watermark must be smaller than perCPUBuffer")
 	}
 
-	fd, err := createPerfEvent(cpu, watermark)
+	fd, err := createPerfEvent(cpu, watermark, unwind_stack)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +87,7 @@ func (ring *perfEventRing) Close() {
 	ring.mmap = nil
 }
 
-func createPerfEvent(cpu, watermark int) (int, error) {
+func createPerfEvent(cpu, watermark int, unwind_stack bool) (int, error) {
 	if watermark == 0 {
 		watermark = 1
 	}
@@ -97,6 +98,12 @@ func createPerfEvent(cpu, watermark int) (int, error) {
 		Bits:        unix.PerfBitWatermark,
 		Sample_type: unix.PERF_SAMPLE_RAW,
 		Wakeup:      uint32(watermark),
+	}
+
+	if unwind_stack {
+		attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
+		attr.Sample_stack_user = 16384
+		attr.Sample_regs_user = (1 << 33) - 1
 	}
 
 	attr.Size = uint32(unsafe.Sizeof(attr))

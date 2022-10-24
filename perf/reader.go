@@ -118,12 +118,16 @@ func readRawSample(rd io.Reader, buf, sampleBuf []byte) ([]byte, error) {
 		internal.NativeEndian.Uint32(buf),
 	}
 
-	var data []byte
-	if size := int(sample.Size); cap(sampleBuf) < size {
-		data = make([]byte, size)
-	} else {
-		data = sampleBuf[:size]
-	}
+	// var data []byte
+	// if size := int(sample.Size); cap(sampleBuf) < size {
+	// 	data = make([]byte, size)
+	// } else {
+	// 	data = sampleBuf[:size]
+	// }
+
+	// 先硬编码进行测试
+	// 16672 = 8 + 8 * 33 + 8 + 16384 + 8
+	data := make([]byte, sample.Size+16672)
 
 	if _, err := io.ReadFull(rd, data); err != nil {
 		return nil, fmt.Errorf("read sample: %v", err)
@@ -171,12 +175,12 @@ type ReaderOptions struct {
 // array must be a PerfEventArray. perCPUBuffer gives the size of the
 // per CPU buffer in bytes. It is rounded up to the nearest multiple
 // of the current page size.
-func NewReader(array *ebpf.Map, perCPUBuffer int) (*Reader, error) {
-	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{})
+func NewReader(array *ebpf.Map, perCPUBuffer int, unwind_stack bool) (*Reader, error) {
+	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, unwind_stack)
 }
 
 // NewReaderWithOptions creates a new reader with the given options.
-func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions) (pr *Reader, err error) {
+func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack bool) (pr *Reader, err error) {
 	if perCPUBuffer < 1 {
 		return nil, errors.New("perCPUBuffer must be larger than 0")
 	}
@@ -211,7 +215,7 @@ func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions)
 	// but doesn't allow using a wildcard like -1 to specify "all CPUs".
 	// Hence we have to create a ring for each CPU.
 	for i := 0; i < nCPU; i++ {
-		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark)
+		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, unwind_stack)
 		if errors.Is(err, unix.ENODEV) {
 			// The requested CPU is currently offline, skip it.
 			rings = append(rings, nil)

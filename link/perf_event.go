@@ -288,7 +288,7 @@ func getTraceEventID(group, name string) (uint64, error) {
 // openTracepointPerfEvent opens a tracepoint-type perf event. System-wide
 // [k,u]probes created by writing to <tracefs>/[k,u]probe_events are tracepoints
 // behind the scenes, and can be attached to using these perf events.
-func openTracepointPerfEvent(tid uint64, pid int, unwind_stack bool) (*sys.FD, error) {
+func openTracepointPerfEvent(tid uint64, pid int) (*sys.FD, error) {
 	attr := unix.PerfEventAttr{
 		Type:        unix.PERF_TYPE_TRACEPOINT,
 		Config:      tid,

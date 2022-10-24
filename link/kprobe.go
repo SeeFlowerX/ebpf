@@ -14,7 +14,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/internal/sys"
 	"github.com/cilium/ebpf/internal/unix"
-	linux "golang.org/x/sys/unix"
 )
 
 var (
@@ -28,7 +27,6 @@ type probeArgs struct {
 	offset, refCtrOffset, cookie uint64
 	pid                          int
 	ret                          bool
-	unwind_stack                 bool
 }
 
 // KprobeOptions defines additional parameters that will be used
@@ -223,6 +221,7 @@ func pmuKprobe(args probeArgs) (*perfEvent, error) {
 //
 // Returns ErrNotSupported if the kernel doesn't support perf_[k,u]probe PMU
 func pmuProbe(typ probeType, args probeArgs) (*perfEvent, error) {
+	// fmt.Println("[pmuProbe] args.unwind_stack:", args.unwind_stack)
 	// Getting the PMU type will fail if the kernel doesn't support
 	// the perf_[k,u]probe PMU.
 	et, err := readUint64FromFileOnce("%d\n", "/sys/bus/event_source/devices", typ.String(), "type")
@@ -289,12 +288,12 @@ func pmuProbe(typ probeType, args probeArgs) (*perfEvent, error) {
 			Ext2:   args.offset,         // Uprobe offset
 			Config: config,              // RefCtrOffset, Retprobe flag
 		}
-		if args.unwind_stack {
-			attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
-			attr.Sample_stack_user = 16384
-			attr.Sample_regs_user = (1 << 33) - 1
-			attr.Size = uint32(unsafe.Sizeof(attr))
-		}
+		// if args.unwind_stack {
+		// 	attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
+		// 	attr.Sample_stack_user = 16384
+		// 	attr.Sample_regs_user = (1 << 33) - 1
+		// 	attr.Size = uint32(unsafe.Sizeof(attr))
+		// }
 	}
 
 	rawFd, err := unix.PerfEventOpen(&attr, args.pid, 0, -1, unix.PERF_FLAG_FD_CLOEXEC)
@@ -398,7 +397,7 @@ func tracefsProbe(typ probeType, args probeArgs) (_ *perfEvent, err error) {
 	}
 
 	// Kprobes are ephemeral tracepoints and share the same perf event type.
-	fd, err := openTracepointPerfEvent(tid, args.pid, false)
+	fd, err := openTracepointPerfEvent(tid, args.pid)
 	if err != nil {
 		return nil, err
 	}

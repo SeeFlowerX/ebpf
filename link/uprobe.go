@@ -290,7 +290,6 @@ func (ex *Executable) uprobe(symbol string, prog *ebpf.Program, opts *UprobeOpti
 		refCtrOffset: opts.RefCtrOffset,
 		ret:          ret,
 		cookie:       opts.Cookie,
-		unwind_stack: opts.UnwindStack,
 	}
 
 	// Use uprobe PMU if the kernel has it available.

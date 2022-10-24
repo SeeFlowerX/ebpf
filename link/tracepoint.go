@@ -29,7 +29,7 @@ type TracepointOptions struct {
 //
 // Note that attaching eBPF programs to syscalls (sys_enter_*/sys_exit_*) is
 // only possible as of kernel 4.14 (commit cf5f5ce).
-func Tracepoint(group, name string, prog *ebpf.Program, opts *TracepointOptions, unwind_stack bool) (Link, error) {
+func Tracepoint(group, name string, prog *ebpf.Program, opts *TracepointOptions) (Link, error) {
 	if group == "" || name == "" {
 		return nil, fmt.Errorf("group and name cannot be empty: %w", errInvalidInput)
 	}
@@ -48,7 +48,7 @@ func Tracepoint(group, name string, prog *ebpf.Program, opts *TracepointOptions,
 		return nil, err
 	}
 
-	fd, err := openTracepointPerfEvent(tid, perfAllThreads, unwind_stack)
+	fd, err := openTracepointPerfEvent(tid, perfAllThreads)
 	if err != nil {
 		return nil, err
 	}

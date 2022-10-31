@@ -48,6 +48,7 @@ type Record struct {
 	// The number of samples which could not be output, since
 	// the ring buffer was full.
 	LostSamples uint64
+	UnwindStack bool
 }
 
 // Read a record from a reader and tag it as being from the given CPU.
@@ -78,7 +79,7 @@ func readRecord(rd io.Reader, rec *Record, buf []byte) error {
 	case unix.PERF_RECORD_SAMPLE:
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
-		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample)
+		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample, rec.UnwindStack)
 		return err
 
 	default:
@@ -108,7 +109,7 @@ type perfEventSample struct {
 	Size uint32
 }
 
-func readRawSample(rd io.Reader, buf, sampleBuf []byte) ([]byte, error) {
+func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack bool) ([]byte, error) {
 	buf = buf[:perfEventSampleSize]
 	if _, err := io.ReadFull(rd, buf); err != nil {
 		return nil, fmt.Errorf("read sample size: %v", err)
@@ -117,17 +118,18 @@ func readRawSample(rd io.Reader, buf, sampleBuf []byte) ([]byte, error) {
 	sample := perfEventSample{
 		internal.NativeEndian.Uint32(buf),
 	}
-
-	// var data []byte
-	// if size := int(sample.Size); cap(sampleBuf) < size {
-	// 	data = make([]byte, size)
-	// } else {
-	// 	data = sampleBuf[:size]
-	// }
-
-	// 先硬编码进行测试
-	// 16672 = 8 + 8 * 33 + 8 + 16384 + 8
-	data := make([]byte, sample.Size+16672)
+	var data []byte
+	if unwind_stack {
+		// 先硬编码进行测试
+		// 16672 = 8 + 8 * 33 + 8 + 16384 + 8
+		data = make([]byte, sample.Size+16672)
+	} else {
+		if size := int(sample.Size); cap(sampleBuf) < size {
+			data = make([]byte, size)
+		} else {
+			data = sampleBuf[:size]
+		}
+	}
 
 	if _, err := io.ReadFull(rd, data); err != nil {
 		return nil, fmt.Errorf("read sample: %v", err)
@@ -311,6 +313,13 @@ func (pr *Reader) SetDeadline(t time.Time) {
 // Returns os.ErrDeadlineExceeded if a deadline was set.
 func (pr *Reader) Read() (Record, error) {
 	var r Record
+	r.UnwindStack = false
+	return r, pr.ReadInto(&r)
+}
+
+func (pr *Reader) ReadWithUnwindStack() (Record, error) {
+	var r Record
+	r.UnwindStack = true
 	return r, pr.ReadInto(&r)
 }
 

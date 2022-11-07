@@ -334,7 +334,9 @@ func (pr *Reader) ReadInto(rec *Record) error {
 
 	for {
 		if len(pr.epollRings) == 0 {
+			fmt.Println("before Wait")
 			nEvents, err := pr.poller.Wait(pr.epollEvents, pr.deadline)
+			fmt.Println("after Wait")
 			if err != nil {
 				return err
 			}

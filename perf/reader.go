@@ -49,6 +49,7 @@ type Record struct {
 	// the ring buffer was full.
 	LostSamples uint64
 	UnwindStack bool
+	Regs        bool
 }
 
 // Read a record from a reader and tag it as being from the given CPU.
@@ -79,7 +80,7 @@ func readRecord(rd io.Reader, rec *Record, buf []byte) error {
 	case unix.PERF_RECORD_SAMPLE:
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
-		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample, rec.UnwindStack)
+		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample, rec.UnwindStack, rec.Regs)
 		return err
 
 	default:
@@ -109,7 +110,7 @@ type perfEventSample struct {
 	Size uint32
 }
 
-func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack bool) ([]byte, error) {
+func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack, regs bool) ([]byte, error) {
 	buf = buf[:perfEventSampleSize]
 	if _, err := io.ReadFull(rd, buf); err != nil {
 		return nil, fmt.Errorf("read sample size: %v", err)
@@ -123,6 +124,9 @@ func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack bool) ([]by
 		// 先硬编码进行测试
 		// 16672 = 8 + 8 * 33 + 8 + 16384 + 8
 		data = make([]byte, sample.Size+16672)
+	} else if regs {
+		// 272 = 8 + 8 * 33
+		data = make([]byte, sample.Size+272)
 	} else {
 		if size := int(sample.Size); cap(sampleBuf) < size {
 			data = make([]byte, size)
@@ -177,12 +181,12 @@ type ReaderOptions struct {
 // array must be a PerfEventArray. perCPUBuffer gives the size of the
 // per CPU buffer in bytes. It is rounded up to the nearest multiple
 // of the current page size.
-func NewReader(array *ebpf.Map, perCPUBuffer int, unwind_stack bool) (*Reader, error) {
-	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, unwind_stack)
+func NewReader(array *ebpf.Map, perCPUBuffer int, unwind_stack, regs bool) (*Reader, error) {
+	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, unwind_stack, regs)
 }
 
 // NewReaderWithOptions creates a new reader with the given options.
-func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack bool) (pr *Reader, err error) {
+func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack, regs bool) (pr *Reader, err error) {
 	if perCPUBuffer < 1 {
 		return nil, errors.New("perCPUBuffer must be larger than 0")
 	}
@@ -217,7 +221,7 @@ func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions,
 	// but doesn't allow using a wildcard like -1 to specify "all CPUs".
 	// Hence we have to create a ring for each CPU.
 	for i := 0; i < nCPU; i++ {
-		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, unwind_stack)
+		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, unwind_stack, regs)
 		if errors.Is(err, unix.ENODEV) {
 			// The requested CPU is currently offline, skip it.
 			rings = append(rings, nil)
@@ -314,12 +318,21 @@ func (pr *Reader) SetDeadline(t time.Time) {
 func (pr *Reader) Read() (Record, error) {
 	var r Record
 	r.UnwindStack = false
+	r.Regs = false
 	return r, pr.ReadInto(&r)
 }
 
 func (pr *Reader) ReadWithUnwindStack() (Record, error) {
 	var r Record
 	r.UnwindStack = true
+	r.Regs = false
+	return r, pr.ReadInto(&r)
+}
+
+func (pr *Reader) ReadWithRegs() (Record, error) {
+	var r Record
+	r.UnwindStack = false
+	r.Regs = true
 	return r, pr.ReadInto(&r)
 }
 

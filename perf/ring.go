@@ -23,12 +23,12 @@ type perfEventRing struct {
 	*ringReader
 }
 
-func newPerfEventRing(cpu, perCPUBuffer, watermark int, unwind_stack bool) (*perfEventRing, error) {
+func newPerfEventRing(cpu, perCPUBuffer, watermark int, unwind_stack, regs bool) (*perfEventRing, error) {
 	if watermark >= perCPUBuffer {
 		return nil, errors.New("watermark must be smaller than perCPUBuffer")
 	}
 
-	fd, err := createPerfEvent(cpu, watermark, unwind_stack)
+	fd, err := createPerfEvent(cpu, watermark, unwind_stack, regs)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (ring *perfEventRing) Close() {
 	ring.mmap = nil
 }
 
-func createPerfEvent(cpu, watermark int, unwind_stack bool) (int, error) {
+func createPerfEvent(cpu, watermark int, unwind_stack, regs bool) (int, error) {
 	if watermark == 0 {
 		watermark = 1
 	}
@@ -103,6 +103,10 @@ func createPerfEvent(cpu, watermark int, unwind_stack bool) (int, error) {
 	if unwind_stack {
 		attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
 		attr.Sample_stack_user = 16384
+		attr.Sample_regs_user = (1 << 33) - 1
+	} else if regs {
+		// 只获取寄存器信息
+		attr.Sample_type |= linux.PERF_SAMPLE_REGS_USER
 		attr.Sample_regs_user = (1 << 33) - 1
 	}
 

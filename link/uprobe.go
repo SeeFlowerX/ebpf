@@ -358,3 +358,10 @@ func uprobeToken(args probeArgs) string {
 
 	return po
 }
+
+func init() {
+	if _, err := os.Stat(tracefsPath); err != nil {
+		tracefsPath = tracefsPath2
+		uprobeEventsPath = filepath.Join(tracefsPath2, "uprobe_events")
+	}
+}

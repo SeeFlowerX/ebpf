@@ -535,10 +535,3 @@ func kprobeToken(args probeArgs) string {
 
 	return po
 }
-
-func init() {
-	if _, err := os.Stat(tracefsPath); err != nil {
-		tracefsPath = tracefsPath2
-		kprobeEventsPath = filepath.Join(tracefsPath2, "kprobe_events")
-	}
-}

@@ -42,8 +42,8 @@ import (
 //   stops any further invocations of the attached eBPF program.
 
 var (
-	tracefsPath  = "/sys/kernel/debug/tracing"
-	tracefsPath2 = "/sys/kernel/tracing"
+	// tracefsPath = "/sys/kernel/debug/tracing"
+	tracefsPath = "/sys/kernel/tracing"
 
 	errInvalidInput = errors.New("invalid input")
 )
@@ -432,10 +432,4 @@ func isValidTraceID(s string) bool {
 	}
 
 	return true
-}
-
-func init() {
-	if _, err := os.Stat(tracefsPath); err != nil {
-		tracefsPath = tracefsPath2
-	}
 }

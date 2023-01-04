@@ -11,7 +11,8 @@ int __section("socket/tail") tail_1() {
 // Tail call map (program array) initialized with program pointers.
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-	__uint(key_size, sizeof(uint32_t));
+	__type(key, uint32_t);
+	__type(value, uint32_t);
 	__uint(max_entries, 2);
 	__array(values, int());
 } prog_array_init __section(".maps") = {
@@ -43,8 +44,8 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
 	__uint(max_entries, 2);
-	__uint(key_size, sizeof(uint32_t));
-	__uint(value_size, sizeof(uint32_t));
+	__type(key, uint32_t);
+	__type(value, uint32_t);
 	__array(values, typeof(inner_map));
 } outer_map_init __section(".maps") = {
 	.values =

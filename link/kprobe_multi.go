@@ -28,7 +28,7 @@ type KprobeMultiOptions struct {
 	// limits the attach point to the function entry or return.
 	//
 	// Mutually exclusive with Symbols.
-	Addresses []uint64
+	Addresses []uintptr
 
 	// Cookies specifies arbitrary values that can be fetched from an eBPF
 	// program via `bpf_get_attach_cookie()`.
@@ -138,7 +138,7 @@ func (kml *kprobeMultiLink) Unpin() error {
 	return fmt.Errorf("unpin kprobe_multi: %w", ErrNotSupported)
 }
 
-var haveBPFLinkKprobeMulti = internal.FeatureTest("bpf_link_kprobe_multi", "5.18", func() error {
+var haveBPFLinkKprobeMulti = internal.NewFeatureTest("bpf_link_kprobe_multi", "5.18", func() error {
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
 		Name: "probe_kpm_link",
 		Type: ebpf.Kprobe,

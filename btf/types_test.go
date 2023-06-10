@@ -1,9 +1,12 @@
 package btf
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"testing"
+
+	"github.com/cilium/ebpf/internal"
 
 	qt "github.com/frankban/quicktest"
 	"github.com/google/go-cmp/cmp"
@@ -30,6 +33,29 @@ func TestSizeof(t *testing.T) {
 			}
 			if have != tc.size {
 				t.Errorf("Expected size %d, got %d", tc.size, have)
+			}
+		})
+	}
+}
+
+func TestPow(t *testing.T) {
+	tests := []struct {
+		n int
+		r bool
+	}{
+		{0, false},
+		{1, true},
+		{2, true},
+		{3, false},
+		{4, true},
+		{5, false},
+		{8, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d", tt.n), func(t *testing.T) {
+			if want, got := tt.r, pow(tt.n); want != got {
+				t.Errorf("unexpected result for n %d; want: %v, got: %v", tt.n, want, got)
 			}
 		})
 	}
@@ -169,6 +195,27 @@ func TestType(t *testing.T) {
 			if diff := cmp.Diff(a, b, compareTypes); diff != "" {
 				t.Errorf("Walk mismatch (-want +got):\n%s", diff)
 			}
+		})
+	}
+}
+
+func TestTagMarshaling(t *testing.T) {
+	for _, typ := range []Type{
+		&declTag{&Struct{Members: []Member{}}, "foo", -1},
+		&typeTag{&Int{}, "foo"},
+	} {
+		t.Run(fmt.Sprint(typ), func(t *testing.T) {
+			var buf bytes.Buffer
+			err := marshalTypes(&buf, []Type{&Void{}, typ}, nil, nil)
+			qt.Assert(t, err, qt.IsNil)
+
+			s, err := loadRawSpec(bytes.NewReader(buf.Bytes()), internal.NativeEndian, nil)
+			qt.Assert(t, err, qt.IsNil)
+
+			have, err := s.TypeByID(1)
+			qt.Assert(t, err, qt.IsNil)
+
+			qt.Assert(t, have, qt.DeepEquals, typ)
 		})
 	}
 }
@@ -340,7 +387,7 @@ func TestInflateLegacyBitfield(t *testing.T) {
 		{"struct after int", []rawType{rawInt, afterInt}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			types, err := inflateRawTypes(test.raw, nil, emptyStrings)
+			types, err := inflateRawTypes(test.raw, emptyStrings, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"reflect"
 	"time"
@@ -77,11 +78,6 @@ type MapSpec struct {
 
 	// The key and value type of this map. May be nil.
 	Key, Value btf.Type
-
-	// The BTF associated with this map.
-	//
-	// Deprecated: use [CollectionSpec.Types] instead.
-	BTF *btf.Spec
 }
 
 func (ms *MapSpec) String() string {
@@ -154,7 +150,11 @@ type MapKV struct {
 	Value interface{}
 }
 
-func (ms *MapSpec) checkCompatibility(m *Map) error {
+// Compatible returns nil if an existing map may be used instead of creating
+// one from the spec.
+//
+// Returns an error wrapping [ErrMapIncompatible] otherwise.
+func (ms *MapSpec) Compatible(m *Map) error {
 	switch {
 	case m.typ != ms.Type:
 		return fmt.Errorf("expected type %v, got %v: %w", ms.Type, m.typ, ErrMapIncompatible)
@@ -169,7 +169,10 @@ func (ms *MapSpec) checkCompatibility(m *Map) error {
 		m.maxEntries != ms.MaxEntries:
 		return fmt.Errorf("expected max entries %v, got %v: %w", ms.MaxEntries, m.maxEntries, ErrMapIncompatible)
 
-	case m.flags != ms.Flags:
+	// BPF_F_RDONLY_PROG is set unconditionally for devmaps. Explicitly allow
+	// this mismatch.
+	case !((ms.Type == DevMap || ms.Type == DevMapHash) && m.flags^ms.Flags == unix.BPF_F_RDONLY_PROG) &&
+		m.flags != ms.Flags:
 		return fmt.Errorf("expected flags %v, got %v: %w", ms.Flags, m.flags, ErrMapIncompatible)
 	}
 	return nil
@@ -277,7 +280,7 @@ func newMapWithOptions(spec *MapSpec, opts MapOptions) (_ *Map, err error) {
 		}
 		defer closeOnError(m)
 
-		if err := spec.checkCompatibility(m); err != nil {
+		if err := spec.Compatible(m); err != nil {
 			return nil, fmt.Errorf("use pinned map %s: %w", spec.Name, err)
 		}
 
@@ -321,7 +324,7 @@ func newMapWithOptions(spec *MapSpec, opts MapOptions) (_ *Map, err error) {
 	if spec.Pinning == PinByName {
 		path := filepath.Join(opts.PinPath, spec.Name)
 		if err := m.Pin(path); err != nil {
-			return nil, fmt.Errorf("pin map: %w", err)
+			return nil, fmt.Errorf("pin map to %s: %w", path, err)
 		}
 	}
 
@@ -431,8 +434,8 @@ func (spec *MapSpec) createMap(inner *sys.FD, opts MapOptions) (_ *Map, err erro
 
 			// Use BTF k/v during map creation.
 			attr.BtfFd = uint32(handle.FD())
-			attr.BtfKeyTypeId = uint32(keyTypeID)
-			attr.BtfValueTypeId = uint32(valueTypeID)
+			attr.BtfKeyTypeId = keyTypeID
+			attr.BtfValueTypeId = valueTypeID
 		}
 	}
 
@@ -450,6 +453,9 @@ func (spec *MapSpec) createMap(inner *sys.FD, opts MapOptions) (_ *Map, err erro
 		}
 		if errors.Is(err, unix.EINVAL) && attr.MaxEntries == 0 {
 			return nil, fmt.Errorf("map create: %w (MaxEntries may be incorrectly set to zero)", err)
+		}
+		if errors.Is(err, unix.EINVAL) && spec.Type == UnspecifiedMap {
+			return nil, fmt.Errorf("map create: cannot use type %s", UnspecifiedMap)
 		}
 		if attr.BtfFd == 0 {
 			return nil, fmt.Errorf("map create: %w (without BTF k/v)", err)
@@ -490,7 +496,7 @@ func newMap(fd *sys.FD, name string, typ MapType, keySize, valueSize, maxEntries
 		return nil, err
 	}
 
-	m.fullValueSize = internal.Align(int(valueSize), 8) * possibleCPUs
+	m.fullValueSize = int(internal.Align(valueSize, 8)) * possibleCPUs
 	return m, nil
 }
 
@@ -793,12 +799,22 @@ func (m *Map) nextKey(key interface{}, nextKeyOut sys.Pointer) error {
 	return nil
 }
 
+var mmapProtectedPage = internal.Memoize(func() ([]byte, error) {
+	return unix.Mmap(-1, 0, os.Getpagesize(), unix.PROT_NONE, unix.MAP_ANON|unix.MAP_SHARED)
+})
+
 // guessNonExistentKey attempts to perform a map lookup that returns ENOENT.
 // This is necessary on kernels before 4.4.132, since those don't support
 // iterating maps from the start by providing an invalid key pointer.
 func (m *Map) guessNonExistentKey() ([]byte, error) {
-	// Provide an invalid value pointer to prevent a copy on the kernel side.
-	valuePtr := sys.NewPointer(unsafe.Pointer(^uintptr(0)))
+	// Map a protected page and use that as the value pointer. This saves some
+	// work copying out the value, which we're not interested in.
+	page, err := mmapProtectedPage()
+	if err != nil {
+		return nil, err
+	}
+	valuePtr := sys.NewSlicePointer(page)
+
 	randKey := make([]byte, int(m.keySize))
 
 	for i := 0; i < 4; i++ {
@@ -1091,7 +1107,7 @@ func (m *Map) Clone() (*Map, error) {
 // You can Clone a map to pin it to a different path.
 //
 // This requires bpffs to be mounted above fileName.
-// See https://docs.cilium.io/en/stable/concepts/kubernetes/configuration/#mounting-bpffs-with-systemd
+// See https://docs.cilium.io/en/stable/network/kubernetes/configuration/#mounting-bpffs-with-systemd
 func (m *Map) Pin(fileName string) error {
 	if err := internal.Pin(m.pinnedPath, fileName, m.fd); err != nil {
 		return err

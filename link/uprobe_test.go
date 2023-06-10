@@ -2,7 +2,6 @@ package link
 
 import (
 	"errors"
-	"fmt"
 	"go/build"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/internal/testutils"
+	"github.com/cilium/ebpf/internal/tracefs"
 	"github.com/cilium/ebpf/internal/unix"
 )
 
@@ -67,6 +67,30 @@ func TestExecutableOffset(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Assert(offset, qt.Equals, uint64(0x1+0x2))
+}
+
+func TestExecutableLazyLoadSymbols(t *testing.T) {
+	c := qt.New(t)
+
+	ex, err := OpenExecutable("/bin/bash")
+	c.Assert(err, qt.IsNil)
+	// Addresses must be empty, will be lazy loaded.
+	c.Assert(ex.addresses, qt.DeepEquals, map[string]uint64{})
+
+	prog := mustLoadProgram(t, ebpf.Kprobe, 0, "")
+	up, err := ex.Uprobe(bashSym, prog, &UprobeOptions{Address: 123})
+	c.Assert(err, qt.IsNil)
+	up.Close()
+
+	// Addresses must still be empty as Address has been provided via options.
+	c.Assert(ex.addresses, qt.DeepEquals, map[string]uint64{})
+
+	up, err = ex.Uprobe(bashSym, prog, nil)
+	c.Assert(err, qt.IsNil)
+	up.Close()
+
+	// Symbol table should be loaded.
+	c.Assert(len(ex.addresses), qt.Not(qt.Equals), 0)
 }
 
 func TestUprobe(t *testing.T) {
@@ -151,27 +175,24 @@ func TestUprobeCreatePMU(t *testing.T) {
 	c.Assert(err, qt.IsNil)
 
 	// Prepare probe args.
-	args := probeArgs{
-		symbol: bashSym,
-		path:   bashEx.path,
-		offset: off,
-		pid:    perfAllThreads,
+	args := tracefs.ProbeArgs{
+		Type:   tracefs.Uprobe,
+		Symbol: bashSym,
+		Path:   bashEx.path,
+		Offset: off,
+		Pid:    perfAllThreads,
 	}
 
 	// uprobe PMU
-	pu, err := pmuUprobe(args)
+	pu, err := pmuProbe(args)
 	c.Assert(err, qt.IsNil)
 	defer pu.Close()
 
-	c.Assert(pu.typ, qt.Equals, uprobeEvent)
-
 	// uretprobe PMU
-	args.ret = true
-	pr, err := pmuUprobe(args)
+	args.Ret = true
+	pr, err := pmuProbe(args)
 	c.Assert(err, qt.IsNil)
 	defer pr.Close()
-
-	c.Assert(pr.typ, qt.Equals, uretprobeEvent)
 }
 
 // Test fallback behaviour on kernels without perf_uprobe PMU available.
@@ -183,14 +204,15 @@ func TestUprobePMUUnavailable(t *testing.T) {
 	c.Assert(err, qt.IsNil)
 
 	// Prepare probe args.
-	args := probeArgs{
-		symbol: bashSym,
-		path:   bashEx.path,
-		offset: off,
-		pid:    perfAllThreads,
+	args := tracefs.ProbeArgs{
+		Type:   tracefs.Uprobe,
+		Symbol: bashSym,
+		Path:   bashEx.path,
+		Offset: off,
+		Pid:    perfAllThreads,
 	}
 
-	pk, err := pmuUprobe(args)
+	pk, err := pmuProbe(args)
 	if err == nil {
 		pk.Close()
 		t.Skipf("Kernel supports perf_uprobe PMU, not asserting error.")
@@ -209,146 +231,49 @@ func TestUprobeTraceFS(t *testing.T) {
 	c.Assert(err, qt.IsNil)
 
 	// Prepare probe args.
-	args := probeArgs{
-		symbol: sanitizeSymbol(bashSym),
-		path:   bashEx.path,
-		offset: off,
-		pid:    perfAllThreads,
+	args := tracefs.ProbeArgs{
+		Type:   tracefs.Uprobe,
+		Symbol: bashSym,
+		Path:   bashEx.path,
+		Offset: off,
+		Pid:    perfAllThreads,
 	}
 
 	// Open and close tracefs u(ret)probes, checking all errors.
-	up, err := tracefsUprobe(args)
+	up, err := tracefsProbe(args)
 	c.Assert(err, qt.IsNil)
 	c.Assert(up.Close(), qt.IsNil)
-	c.Assert(up.typ, qt.Equals, uprobeEvent)
 
-	args.ret = true
-	up, err = tracefsUprobe(args)
+	args.Ret = true
+	up, err = tracefsProbe(args)
 	c.Assert(err, qt.IsNil)
 	c.Assert(up.Close(), qt.IsNil)
-	c.Assert(up.typ, qt.Equals, uretprobeEvent)
 
 	// Create two identical trace events, ensure their IDs differ.
-	args.ret = false
-	u1, err := tracefsUprobe(args)
+	args.Ret = false
+	u1, err := tracefsProbe(args)
 	c.Assert(err, qt.IsNil)
 	defer u1.Close()
-	c.Assert(u1.tracefsID, qt.Not(qt.Equals), 0)
+	c.Assert(u1.tracefsEvent, qt.IsNotNil)
 
-	u2, err := tracefsUprobe(args)
+	u2, err := tracefsProbe(args)
 	c.Assert(err, qt.IsNil)
 	defer u2.Close()
-	c.Assert(u2.tracefsID, qt.Not(qt.Equals), 0)
+	c.Assert(u2.tracefsEvent, qt.IsNotNil)
 
 	// Compare the uprobes' tracefs IDs.
-	c.Assert(u1.tracefsID, qt.Not(qt.CmpEquals()), u2.tracefsID)
-}
+	c.Assert(u1.tracefsEvent.ID(), qt.Not(qt.Equals), u2.tracefsEvent.ID())
 
-// Test u(ret)probe creation writing directly to <tracefs>/uprobe_events.
-// Only runs on 5.0 and over. Earlier versions ignored writes of duplicate
-// events, while 5.0 started returning -EEXIST when a uprobe event already
-// exists.
-func TestUprobeCreateTraceFS(t *testing.T) {
-	testutils.SkipOnOldKernel(t, "5.0", "<tracefs>/uprobe_events doesn't reject duplicate events")
+	// Expect an error when supplying an invalid custom group name
+	args.Group = "/"
+	_, err = tracefsProbe(args)
+	c.Assert(err, qt.Not(qt.IsNil))
 
-	c := qt.New(t)
-
-	// Fetch the offset from the /bin/bash Executable already defined.
-	off, err := bashEx.address(bashSym, &UprobeOptions{})
+	args.Group = "customgroup"
+	u3, err := tracefsProbe(args)
 	c.Assert(err, qt.IsNil)
-
-	// Sanitize the symbol in order to be used in tracefs API.
-	ssym := sanitizeSymbol(bashSym)
-
-	pg, _ := randomGroup("ebpftest")
-	rg, _ := randomGroup("ebpftest")
-
-	// Tee up cleanups in case any of the Asserts abort the function.
-	defer func() {
-		_ = closeTraceFSProbeEvent(uprobeType, pg, ssym)
-		_ = closeTraceFSProbeEvent(uprobeType, rg, ssym)
-	}()
-
-	// Prepare probe args.
-	args := probeArgs{
-		group:  pg,
-		symbol: ssym,
-		path:   bashEx.path,
-		offset: off,
-	}
-
-	// Create a uprobe.
-	err = createTraceFSProbeEvent(uprobeType, args)
-	c.Assert(err, qt.IsNil)
-
-	// Attempt to create an identical uprobe using tracefs,
-	// expect it to fail with os.ErrExist.
-	err = createTraceFSProbeEvent(uprobeType, args)
-	c.Assert(errors.Is(err, os.ErrExist), qt.IsTrue,
-		qt.Commentf("expected consecutive uprobe creation to contain os.ErrExist, got: %v", err))
-
-	// Expect a successful close of the kprobe.
-	c.Assert(closeTraceFSProbeEvent(uprobeType, pg, ssym), qt.IsNil)
-
-	args.group = rg
-	args.ret = true
-
-	// Same test for a kretprobe.
-	err = createTraceFSProbeEvent(uprobeType, args)
-	c.Assert(err, qt.IsNil)
-
-	err = createTraceFSProbeEvent(uprobeType, args)
-	c.Assert(os.IsExist(err), qt.IsFalse,
-		qt.Commentf("expected consecutive uretprobe creation to contain os.ErrExist, got: %v", err))
-
-	// Expect a successful close of the uretprobe.
-	c.Assert(closeTraceFSProbeEvent(uprobeType, rg, ssym), qt.IsNil)
-}
-
-func TestUprobeSanitizedSymbol(t *testing.T) {
-	tests := []struct {
-		symbol   string
-		expected string
-	}{
-		{"readline", "readline"},
-		{"main.Func123", "main_Func123"},
-		{"a.....a", "a_a"},
-		{"./;'{}[]a", "_a"},
-		{"***xx**xx###", "_xx_xx_"},
-		{`@P#r$i%v^3*+t)i&k++--`, "_P_r_i_v_3_t_i_k_"},
-	}
-
-	for i, tt := range tests {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			sanitized := sanitizeSymbol(tt.symbol)
-			if tt.expected != sanitized {
-				t.Errorf("Expected sanitized symbol to be '%s', got '%s'", tt.expected, sanitized)
-			}
-		})
-	}
-}
-
-func TestUprobeToken(t *testing.T) {
-	tests := []struct {
-		args     probeArgs
-		expected string
-	}{
-		{probeArgs{path: "/bin/bash"}, "/bin/bash:0x0"},
-		{probeArgs{path: "/bin/bash", offset: 1}, "/bin/bash:0x1"},
-		{probeArgs{path: "/bin/bash", offset: 65535}, "/bin/bash:0xffff"},
-		{probeArgs{path: "/bin/bash", offset: 65536}, "/bin/bash:0x10000"},
-		{probeArgs{path: "/bin/bash", offset: 1, refCtrOffset: 1}, "/bin/bash:0x1(0x1)"},
-		{probeArgs{path: "/bin/bash", offset: 1, refCtrOffset: 65535}, "/bin/bash:0x1(0xffff)"},
-	}
-
-	for i, tt := range tests {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			po := uprobeToken(tt.args)
-			if tt.expected != po {
-				t.Errorf("Expected path:offset to be '%s', got '%s'", tt.expected, po)
-			}
-		})
-	}
+	defer u3.Close()
+	c.Assert(u3.tracefsEvent.Group(), qt.Matches, `customgroup_[a-f0-9]{16}`)
 }
 
 func TestUprobeProgramCall(t *testing.T) {

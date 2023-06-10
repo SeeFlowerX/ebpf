@@ -19,6 +19,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+
+	qt "github.com/frankban/quicktest"
 )
 
 func TestLoadCollectionSpec(t *testing.T) {
@@ -222,7 +224,7 @@ func TestLoadCollectionSpec(t *testing.T) {
 		}
 
 		if ret != 7 {
-			t.Error("Expected return value to be 5, got", ret)
+			t.Error("Unexpected return value:", ret)
 		}
 	})
 }
@@ -479,6 +481,7 @@ func TestStringSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new collection: %s", err)
 	}
+	defer coll.Close()
 
 	prog := coll.Programs["filter"]
 	if prog == nil {
@@ -568,6 +571,219 @@ func TestTailCall(t *testing.T) {
 		// Expect the tail_1 tail call to be taken, returning value 42.
 		if ret != 42 {
 			t.Fatalf("Expected tail call to return value 42, got %d", ret)
+		}
+	})
+}
+
+func TestKconfigKernelVersion(t *testing.T) {
+	testutils.Files(t, testutils.Glob(t, "testdata/kconfig-*.elf"), func(t *testing.T, file string) {
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if spec.ByteOrder != internal.NativeEndian {
+			return
+		}
+
+		var obj struct {
+			Main *Program `ebpf:"kernel_version"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer obj.Main.Close()
+
+		ret, _, err := obj.Main.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		v, err := internal.KernelVersion()
+		if err != nil {
+			t.Fatalf("getting kernel version: %s", err)
+		}
+
+		version := v.Kernel()
+		if ret != version {
+			t.Fatalf("Expected eBPF to return value %d, got %d", version, ret)
+		}
+	})
+}
+
+func TestKconfigSyscallWrapper(t *testing.T) {
+	testutils.Files(t, testutils.Glob(t, "testdata/kconfig-*.elf"), func(t *testing.T, file string) {
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if spec.ByteOrder != internal.NativeEndian {
+			return
+		}
+
+		var obj struct {
+			Main *Program `ebpf:"syscall_wrapper"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer obj.Main.Close()
+
+		ret, _, err := obj.Main.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var expected uint32
+		if testutils.IsKernelLessThan(t, "4.17") {
+			expected = 0
+		} else {
+			expected = 1
+		}
+
+		if ret != expected {
+			t.Fatalf("Expected eBPF to return value %d, got %d", expected, ret)
+		}
+	})
+}
+
+func TestKconfigConfig(t *testing.T) {
+	testutils.Files(t, testutils.Glob(t, "testdata/kconfig_config-*.elf"), func(t *testing.T, file string) {
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if spec.ByteOrder != internal.NativeEndian {
+			return
+		}
+
+		var obj struct {
+			Main     *Program `ebpf:"kconfig"`
+			ArrayMap *Map     `ebpf:"array_map"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer obj.Main.Close()
+		defer obj.ArrayMap.Close()
+
+		_, _, err = obj.Main.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var value uint64
+		err = obj.ArrayMap.Lookup(uint32(0), &value)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// CONFIG_HZ must have a value.
+		qt.Assert(t, value, qt.Not(qt.Equals), 0)
+	})
+}
+
+func TestKfunc(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "bpf_kfunc_call_test_mem_len_pass1")
+	testutils.Files(t, testutils.Glob(t, "testdata/kfunc-e*.elf"), func(t *testing.T, file string) {
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if spec.ByteOrder != internal.NativeEndian {
+			return
+		}
+
+		var obj struct {
+			Main *Program `ebpf:"call_kfunc"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatalf("%v+", err)
+		}
+		defer obj.Main.Close()
+
+		ret, _, err := obj.Main.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if ret != 1 {
+			t.Fatalf("Expected kfunc to return value 1, got %d", ret)
+		}
+	})
+}
+
+func TestInvalidKfunc(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "bpf_kfunc_call_test_mem_len_pass1")
+
+	file := fmt.Sprintf("testdata/invalid-kfunc-%s.elf", internal.ClangEndian)
+	coll, err := LoadCollection(file)
+	if err == nil {
+		coll.Close()
+		t.Fatal("Expected an error")
+	}
+
+	var ike *incompatibleKfuncError
+	if !errors.As(err, &ike) {
+		t.Fatalf("Expected an error wrapping incompatibleKfuncError, got %T", err)
+	}
+}
+
+func TestKfuncKmod(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "Kernel module function calls")
+
+	if !haveTestmod(t) {
+		t.Skip("bpf_testmod not loaded")
+	}
+
+	testutils.Files(t, testutils.Glob(t, "testdata/kfunc-kmod-*.elf"), func(t *testing.T, file string) {
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if spec.ByteOrder != internal.NativeEndian {
+			return
+		}
+
+		var obj struct {
+			Main *Program `ebpf:"call_kfunc"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatalf("%v+", err)
+		}
+		defer obj.Main.Close()
+
+		ret, _, err := obj.Main.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if ret != 1 {
+			t.Fatalf("Expected kfunc to return value 1, got %d", ret)
 		}
 	})
 }
@@ -764,7 +980,12 @@ func TestLibBPFCompat(t *testing.T) {
 			t.Skip("Skipping since the test generates dynamic BTF")
 		case "test_static_linked.linked3.o":
 			t.Skip("Skipping since .text contains 'subprog' twice")
-		case "linked_maps.linked3.o", "linked_funcs.linked3.o":
+		case "linked_maps.linked3.o", "linked_funcs.linked3.o", "linked_vars.linked3.o",
+			"kprobe_multi.o", "kprobe_multi.linked3.o", "test_ksyms_weak.o",
+			"test_ksyms_weak.llinked3.o", "test_ksyms_weak.llinked2.o", "test_ksyms_weak.llinked1.o",
+			"test_ksyms_weak.linked3.o", "test_ksyms_module.o", "test_ksyms_module.llinked3.o",
+			"test_ksyms_module.llinked2.o", "test_ksyms_module.llinked1.o", "test_ksyms_module.linked3.o",
+			"test_ksyms.o", "test_ksyms.linked3.o":
 			t.Skip("Skipping since weak relocations are not supported")
 		case "bloom_filter_map.o", "bloom_filter_map.linked3.o",
 			"bloom_filter_bench.o", "bloom_filter_bench.linked3.o":
@@ -773,6 +994,8 @@ func TestLibBPFCompat(t *testing.T) {
 			t.Skip("Skipping due to possible bug in upstream CO-RE generation")
 		case "test_usdt.o", "test_usdt.linked3.o", "test_urandom_usdt.o", "test_urandom_usdt.linked3.o", "test_usdt_multispec.o":
 			t.Skip("Skipping due to missing support for usdt.bpf.h")
+		case "bpf_cubic.o", "bpf_cubic.linked3.o", "bpf_iter_tcp6.o", "bpf_iter_tcp6.linked3.o", "bpf_iter_tcp4.o", "bpf_iter_tcp4.linked3.o", "bpf_iter_ipv6_route.o", "bpf_iter_ipv6_route.linked3.o", "test_subskeleton_lib.o", "test_skeleton.o", "test_skeleton.linked3.o", "test_subskeleton_lib.linked3.o", "test_subskeleton.o", "test_subskeleton.linked3.o", "test_core_extern.linked3.o", "test_core_extern.o", "profiler1.linked3.o", "profiler3.o", "profiler3.linked3.o", "profiler2.o", "profiler2.linked3.o", "profiler1.o":
+			t.Skip("Skipping due to using CONFIG_* variable which are not supported at the moment")
 		}
 
 		t.Parallel()
@@ -941,10 +1164,22 @@ func TestGetProgType(t *testing.T) {
 			At: AttachNone,
 			To: "",
 		},
+		"xdp.frags/foo": {
+			Pt: XDP,
+			At: AttachNone,
+			To: "",
+			Fl: unix.BPF_F_XDP_HAS_FRAGS,
+		},
 		"xdp_devmap/foo": {
 			Pt: XDP,
 			At: AttachXDPDevMap,
 			To: "foo",
+		},
+		"xdp.frags_devmap/foo": {
+			Pt: XDP,
+			At: AttachXDPDevMap,
+			To: "foo",
+			Fl: unix.BPF_F_XDP_HAS_FRAGS,
 		},
 		"cgroup_skb/ingress": {
 			Pt: CGroupSKB,

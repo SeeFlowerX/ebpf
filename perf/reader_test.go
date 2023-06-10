@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"syscall"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/testutils"
+	"github.com/cilium/ebpf/internal/testutils/fdtrace"
 	"github.com/cilium/ebpf/internal/unix"
 
 	qt "github.com/frankban/quicktest"
@@ -23,8 +25,12 @@ var (
 	readTimeout = 250 * time.Millisecond
 )
 
+func TestMain(m *testing.M) {
+	fdtrace.TestMain(m)
+}
+
 func TestPerfReader(t *testing.T) {
-	prog, events := mustOutputSamplesProg(t, 5)
+	events := perfEventArray(t)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -32,30 +38,9 @@ func TestPerfReader(t *testing.T) {
 	}
 	defer rd.Close()
 
-	ret, _, err := prog.Test(internal.EmptyBPFContext)
-	testutils.SkipIfNotSupported(t, err)
-	if err != nil {
-		t.Fatal(err)
-	}
+	outputSamples(t, events, 5)
 
-	if errno := syscall.Errno(-int32(ret)); errno != 0 {
-		t.Fatal("Expected 0 as return value, got", errno)
-	}
-
-	record, err := rd.Read()
-	if err != nil {
-		t.Fatal("Can't read samples:", err)
-	}
-
-	want := []byte{1, 2, 3, 4, 4, 0, 0, 0, 0, 0, 0, 0}
-	if !bytes.Equal(record.RawSample, want) {
-		t.Log(record.RawSample)
-		t.Error("Sample doesn't match expected output")
-	}
-
-	if record.CPU < 0 {
-		t.Error("Record has invalid CPU number")
-	}
+	checkRecord(t, rd)
 
 	rd.SetDeadline(time.Now().Add(4 * time.Millisecond))
 	_, err = rd.Read()
@@ -63,7 +48,7 @@ func TestPerfReader(t *testing.T) {
 }
 
 func TestReaderSetDeadline(t *testing.T) {
-	_, events := mustOutputSamplesProg(t, 5)
+	events := perfEventArray(t)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -80,18 +65,42 @@ func TestReaderSetDeadline(t *testing.T) {
 	}
 }
 
-func outputSamplesProg(sampleSizes ...int) (*ebpf.Program, *ebpf.Map, error) {
-	const bpfFCurrentCPU = 0xffffffff
+func outputSamples(tb testing.TB, events *ebpf.Map, sampleSizes ...byte) {
+	prog := outputSamplesProg(tb, events, sampleSizes...)
 
-	events, err := ebpf.NewMap(&ebpf.MapSpec{
-		Type: ebpf.PerfEventArray,
-	})
+	ret, _, err := prog.Test(internal.EmptyBPFContext)
+	testutils.SkipIfNotSupported(tb, err)
 	if err != nil {
-		return nil, nil, err
+		tb.Fatal(err)
 	}
 
-	var maxSampleSize int
+	if errno := syscall.Errno(-int32(ret)); errno != 0 {
+		tb.Fatal("Expected 0 as return value, got", errno)
+	}
+}
+
+// outputSamplesProg creates a program which submits a series of samples to a PerfEventArray.
+//
+// The format of each sample is:
+//
+//	index:   0    1    2    3    ... size - 1
+//	content: size id   0xff 0xff ... 0xff     [padding]
+//
+// padding is an implementation detail of the perf buffer and 1-7 bytes long. The
+// contents are undefined.
+func outputSamplesProg(tb testing.TB, events *ebpf.Map, sampleSizes ...byte) *ebpf.Program {
+	tb.Helper()
+
+	// Requires at least 4.9 (0515e5999a46 "bpf: introduce BPF_PROG_TYPE_PERF_EVENT program type")
+	testutils.SkipOnOldKernel(tb, "4.9", "perf events support")
+
+	const bpfFCurrentCPU = 0xffffffff
+
+	var maxSampleSize byte
 	for _, sampleSize := range sampleSizes {
+		if sampleSize < 2 {
+			tb.Fatalf("Sample size %d is too small to contain size and counter", sampleSize)
+		}
 		if sampleSize > maxSampleSize {
 			maxSampleSize = sampleSize
 		}
@@ -99,24 +108,33 @@ func outputSamplesProg(sampleSizes ...int) (*ebpf.Program, *ebpf.Map, error) {
 
 	// Fill a buffer on the stack, and stash context somewhere
 	insns := asm.Instructions{
-		asm.LoadImm(asm.R0, 0x0102030404030201, asm.DWord),
+		asm.LoadImm(asm.R0, ^int64(0), asm.DWord),
 		asm.Mov.Reg(asm.R9, asm.R1),
 	}
 
-	bufDwords := (maxSampleSize / 8) + 1
+	bufDwords := int(maxSampleSize/8) + 1
 	for i := 0; i < bufDwords; i++ {
 		insns = append(insns,
 			asm.StoreMem(asm.RFP, int16(i+1)*-8, asm.R0, asm.DWord),
 		)
 	}
 
-	for _, sampleSize := range sampleSizes {
+	for i, sampleSize := range sampleSizes {
 		insns = append(insns,
+			// Restore stashed context.
 			asm.Mov.Reg(asm.R1, asm.R9),
+			// map
 			asm.LoadMapPtr(asm.R2, events.FD()),
+			// flags
 			asm.LoadImm(asm.R3, bpfFCurrentCPU, asm.DWord),
+			// buffer
 			asm.Mov.Reg(asm.R4, asm.RFP),
 			asm.Add.Imm(asm.R4, int32(bufDwords*-8)),
+			// buffer[0] = size
+			asm.StoreImm(asm.R4, 0, int64(sampleSize), asm.Byte),
+			// buffer[1] = i
+			asm.StoreImm(asm.R4, 1, int64(i&math.MaxUint8), asm.Byte),
+			// size
 			asm.Mov.Imm(asm.R5, int32(sampleSize)),
 			asm.FnPerfEventOutput.Call(),
 		)
@@ -130,29 +148,31 @@ func outputSamplesProg(sampleSizes ...int) (*ebpf.Program, *ebpf.Map, error) {
 		Instructions: insns,
 	})
 	if err != nil {
-		events.Close()
-		return nil, nil, err
-	}
-
-	return prog, events, nil
-}
-
-func mustOutputSamplesProg(tb testing.TB, sampleSizes ...int) (*ebpf.Program, *ebpf.Map) {
-	tb.Helper()
-
-	// Requires at least 4.9 (0515e5999a46 "bpf: introduce BPF_PROG_TYPE_PERF_EVENT program type")
-	testutils.SkipOnOldKernel(tb, "4.9", "perf events support")
-
-	prog, events, err := outputSamplesProg(sampleSizes...)
-	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() {
-		prog.Close()
-		events.Close()
-	})
+	tb.Cleanup(func() { prog.Close() })
 
-	return prog, events
+	return prog
+}
+
+func checkRecord(tb testing.TB, rd *Reader) (id int) {
+	tb.Helper()
+
+	rec, err := rd.Read()
+	qt.Assert(tb, err, qt.IsNil)
+
+	qt.Assert(tb, rec.CPU >= 0, qt.IsTrue, qt.Commentf("Record has invalid CPU number"))
+
+	size := int(rec.RawSample[0])
+	qt.Assert(tb, len(rec.RawSample) >= size, qt.IsTrue, qt.Commentf("RawSample is at least size bytes"))
+
+	for i, v := range rec.RawSample[2:size] {
+		qt.Assert(tb, v, qt.Equals, byte(0xff), qt.Commentf("filler at position %d should match", i+2))
+	}
+
+	// padding is ignored since it's value is undefined.
+
+	return int(rec.RawSample[1])
 }
 
 func TestPerfReaderLostSample(t *testing.T) {
@@ -218,7 +238,7 @@ func TestPerfReaderLostSample(t *testing.T) {
 		t.Fatal("unsupported page size:", pageSize)
 	}
 
-	var sampleSizes []int
+	var sampleSizes []byte
 	// Fill the ring with the maximum number of output_large events that will fit,
 	// and generate a lost event by writing an additional event.
 	for i := 0; i < maxEvents+1; i++ {
@@ -228,7 +248,7 @@ func TestPerfReaderLostSample(t *testing.T) {
 	// Generate a small event to trigger the lost record
 	sampleSizes = append(sampleSizes, 5)
 
-	prog, events := mustOutputSamplesProg(t, sampleSizes...)
+	events := perfEventArray(t)
 
 	rd, err := NewReader(events, pageSize)
 	if err != nil {
@@ -236,15 +256,7 @@ func TestPerfReaderLostSample(t *testing.T) {
 	}
 	defer rd.Close()
 
-	ret, _, err := prog.Test(internal.EmptyBPFContext)
-	testutils.SkipIfNotSupported(t, err)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if errno := syscall.Errno(-int32(ret)); errno != 0 {
-		t.Fatal("Expected 0 as return value, got", errno)
-	}
+	outputSamples(t, events, sampleSizes...)
 
 	for range sampleSizes {
 		record, err := rd.Read()
@@ -258,8 +270,72 @@ func TestPerfReaderLostSample(t *testing.T) {
 	}
 }
 
+func TestPerfReaderOverwritable(t *testing.T) {
+	// Smallest buffer size.
+	pageSize := os.Getpagesize()
+
+	const sampleSize = math.MaxUint8
+
+	// Account for perf header (8) and size (4), align to 8 bytes as perf does.
+	realSampleSize := internal.Align(sampleSize+8+4, 8)
+	maxEvents := pageSize / realSampleSize
+
+	var sampleSizes []byte
+	for i := 0; i < maxEvents; i++ {
+		sampleSizes = append(sampleSizes, sampleSize)
+	}
+	// Append an extra sample that will overwrite the first sample.
+	sampleSizes = append(sampleSizes, sampleSize)
+
+	events := perfEventArray(t)
+
+	rd, err := NewReaderWithOptions(events, pageSize, ReaderOptions{Overwritable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+
+	_, err = rd.Read()
+	qt.Assert(t, err, qt.ErrorIs, errMustBePaused)
+
+	outputSamples(t, events, sampleSizes...)
+
+	qt.Assert(t, rd.Pause(), qt.IsNil)
+	rd.SetDeadline(time.Now())
+
+	nextID := maxEvents
+	for i := 0; i < maxEvents; i++ {
+		id := checkRecord(t, rd)
+		qt.Assert(t, id, qt.Equals, nextID)
+		nextID--
+	}
+}
+
+func TestPerfReaderOverwritableEmpty(t *testing.T) {
+	events := perfEventArray(t)
+	rd, err := NewReaderWithOptions(events, os.Getpagesize(), ReaderOptions{Overwritable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+
+	err = rd.Pause()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rd.SetDeadline(time.Now().Add(4 * time.Millisecond))
+	_, err = rd.Read()
+	qt.Assert(t, errors.Is(err, os.ErrDeadlineExceeded), qt.IsTrue, qt.Commentf("expected os.ErrDeadlineExceeded"))
+
+	err = rd.Resume()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPerfReaderClose(t *testing.T) {
-	_, events := mustOutputSamplesProg(t, 5)
+	events := perfEventArray(t)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -299,7 +375,7 @@ func TestPerfReaderClose(t *testing.T) {
 }
 
 func TestCreatePerfEvent(t *testing.T) {
-	fd, err := createPerfEvent(0, 1)
+	fd, err := createPerfEvent(0, 1, false)
 	if err != nil {
 		t.Fatal("Can't create perf event:", err)
 	}
@@ -315,7 +391,7 @@ func TestReadRecord(t *testing.T) {
 	}
 
 	var rec Record
-	err = readRecord(&buf, &rec, make([]byte, perfEventHeaderSize))
+	err = readRecord(&buf, &rec, make([]byte, perfEventHeaderSize), false)
 	if !IsUnknownEvent(err) {
 		t.Error("readRecord should return unknown event error, got", err)
 	}
@@ -324,7 +400,7 @@ func TestReadRecord(t *testing.T) {
 func TestPause(t *testing.T) {
 	t.Parallel()
 
-	prog, events := mustOutputSamplesProg(t, 5)
+	events := perfEventArray(t)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -338,6 +414,7 @@ func TestPause(t *testing.T) {
 	}
 
 	// Write a sample. The reader should read it.
+	prog := outputSamplesProg(t, events, 5)
 	ret, _, err := prog.Test(internal.EmptyBPFContext)
 	testutils.SkipIfNotSupported(t, err)
 	if err != nil || ret != 0 {
@@ -406,7 +483,8 @@ func TestPause(t *testing.T) {
 }
 
 func BenchmarkReader(b *testing.B) {
-	prog, events := mustOutputSamplesProg(b, 80)
+	events := perfEventArray(b)
+	prog := outputSamplesProg(b, events, 80)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -433,7 +511,8 @@ func BenchmarkReader(b *testing.B) {
 }
 
 func BenchmarkReadInto(b *testing.B) {
-	prog, events := mustOutputSamplesProg(b, 80)
+	events := perfEventArray(b)
+	prog := outputSamplesProg(b, events, 80)
 
 	rd, err := NewReader(events, 4096)
 	if err != nil {
@@ -465,11 +544,7 @@ func BenchmarkReadInto(b *testing.B) {
 
 // This exists just to make the example below nicer.
 func bpfPerfEventOutputProgram() (*ebpf.Program, *ebpf.Map) {
-	prog, events, err := outputSamplesProg(5)
-	if err != nil {
-		panic(err)
-	}
-	return prog, events
+	return nil, nil
 }
 
 // ExamplePerfReader submits a perf event using BPF,
@@ -545,4 +620,15 @@ func ExampleReader_ReadInto() {
 
 		fmt.Println("Sample:", rec.RawSample[:5])
 	}
+}
+
+func perfEventArray(tb testing.TB) *ebpf.Map {
+	events, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type: ebpf.PerfEventArray,
+	})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { events.Close() })
+	return events
 }

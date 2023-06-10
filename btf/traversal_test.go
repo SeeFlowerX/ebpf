@@ -2,18 +2,10 @@ package btf
 
 import (
 	"fmt"
-	"math/rand"
 	"testing"
-	"time"
 
 	qt "github.com/frankban/quicktest"
 )
-
-func init() {
-	seed := time.Now().UnixMicro()
-	fmt.Println("seed:", seed)
-	rand.Seed(seed)
-}
 
 func TestPostorderTraversal(t *testing.T) {
 	ptr := newCyclicalType(2).(*Pointer)

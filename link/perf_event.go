@@ -38,7 +38,10 @@ import (
 //   stops any further invocations of the attached eBPF program.
 
 var (
-	errInvalidInput = tracefs.ErrInvalidInput
+	// tracefsPath = "/sys/kernel/debug/tracing"
+	tracefsPath = "/sys/kernel/tracing"
+
+	errInvalidInput = errors.New("invalid input")
 )
 
 const (

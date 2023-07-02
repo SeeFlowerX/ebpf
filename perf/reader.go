@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/epoll"
 	"github.com/cilium/ebpf/internal/unix"
+	linux "golang.org/x/sys/unix"
 )
 
 var (
@@ -50,6 +51,7 @@ type Record struct {
 	LostSamples uint64
 	UnwindStack bool
 	Regs        bool
+	RecordType  uint32
 }
 
 // Read a record from a reader and tag it as being from the given CPU.
@@ -70,6 +72,7 @@ func readRecord(rd io.Reader, rec *Record, buf []byte) error {
 		internal.NativeEndian.Uint16(buf[4:6]),
 		internal.NativeEndian.Uint16(buf[6:8]),
 	}
+	rec.RecordType = header.Type
 
 	switch header.Type {
 	case unix.PERF_RECORD_LOST:
@@ -81,6 +84,19 @@ func readRecord(rd io.Reader, rec *Record, buf []byte) error {
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
 		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample, rec.UnwindStack, rec.Regs)
+		return err
+
+	case linux.PERF_RECORD_MMAP2:
+		// 直接完整读取 解析工作后面做 免得对当前模块做大改动
+		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
+		return err
+
+	case linux.PERF_RECORD_EXIT:
+		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
+		return err
+
+	case linux.PERF_RECORD_FORK:
+		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
 		return err
 
 	default:
@@ -108,6 +124,14 @@ var perfEventSampleSize = binary.Size(uint32(0))
 // This must match 'struct perf_event_sample in kernel sources.
 type perfEventSample struct {
 	Size uint32
+}
+
+func readLeftFull(rd io.Reader, sampleBuf []byte, header perfEventHeader) ([]byte, error) {
+	buf := make([]byte, int(header.Size)-perfEventHeaderSize)
+	if _, err := io.ReadFull(rd, buf); err != nil {
+		return sampleBuf[:0], fmt.Errorf("readLeftFull err: %v", err)
+	}
+	return buf, nil
 }
 
 func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack, regs bool) ([]byte, error) {
@@ -181,12 +205,12 @@ type ReaderOptions struct {
 // array must be a PerfEventArray. perCPUBuffer gives the size of the
 // per CPU buffer in bytes. It is rounded up to the nearest multiple
 // of the current page size.
-func NewReader(array *ebpf.Map, perCPUBuffer int, unwind_stack, regs bool) (*Reader, error) {
-	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, unwind_stack, regs)
+func NewReader(array *ebpf.Map, perCPUBuffer int) (*Reader, error) {
+	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, false, false, false)
 }
 
 // NewReaderWithOptions creates a new reader with the given options.
-func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack, regs bool) (pr *Reader, err error) {
+func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack, regs, perf_mmap bool) (pr *Reader, err error) {
 	if perCPUBuffer < 1 {
 		return nil, errors.New("perCPUBuffer must be larger than 0")
 	}
@@ -221,7 +245,7 @@ func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions,
 	// but doesn't allow using a wildcard like -1 to specify "all CPUs".
 	// Hence we have to create a ring for each CPU.
 	for i := 0; i < nCPU; i++ {
-		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, unwind_stack, regs)
+		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, unwind_stack, regs, perf_mmap)
 		if errors.Is(err, unix.ENODEV) {
 			// The requested CPU is currently offline, skip it.
 			rings = append(rings, nil)

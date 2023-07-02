@@ -23,12 +23,12 @@ type perfEventRing struct {
 	*ringReader
 }
 
-func newPerfEventRing(cpu, perCPUBuffer, watermark int, unwind_stack, regs bool) (*perfEventRing, error) {
+func newPerfEventRing(cpu, perCPUBuffer, watermark int, unwind_stack, regs, perf_mmap bool) (*perfEventRing, error) {
 	if watermark >= perCPUBuffer {
 		return nil, errors.New("watermark must be smaller than perCPUBuffer")
 	}
 
-	fd, err := createPerfEvent(cpu, watermark, unwind_stack, regs)
+	fd, err := createPerfEvent(cpu, watermark, unwind_stack, regs, perf_mmap)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (ring *perfEventRing) Close() {
 	ring.mmap = nil
 }
 
-func createPerfEvent(cpu, watermark int, unwind_stack, regs bool) (int, error) {
+func createPerfEvent(cpu, watermark int, unwind_stack, regs, perf_mmap bool) (int, error) {
 	if watermark == 0 {
 		watermark = 1
 	}
@@ -108,6 +108,17 @@ func createPerfEvent(cpu, watermark int, unwind_stack, regs bool) (int, error) {
 		// 只获取寄存器信息
 		attr.Sample_type |= linux.PERF_SAMPLE_REGS_USER
 		attr.Sample_regs_user = (1 << 33) - 1
+	}
+	if perf_mmap {
+		attr.Bits |= linux.PerfBitMmap
+		// attr.Bits |= linux.PerfBitComm
+		// // mmap_data 标志位用来获取不可执行的 mmap 相关数据 比如获取 vdex 之类的信息
+		// // 但是应该只需要一次 simpleperf 说明如下
+		// // To profile java code, need to dump maps containing vdex files, which are not executable.
+		// attr.Bits |= linux.PerfBitMmapData
+		// 考虑到要给 5.10+ 内核用户使用 那么这里之间设置 mmap2 的标志位即可
+		// 实际上 mmap2 标志位生效的前提是 mmap 也设置了
+		attr.Bits |= linux.PerfBitMmap2
 	}
 
 	attr.Size = uint32(unsafe.Sizeof(attr))

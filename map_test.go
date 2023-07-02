@@ -31,6 +31,21 @@ var (
 	}
 )
 
+// newHash returns a new Map of type Hash. Cleanup is handled automatically.
+func newHash(t *testing.T) *Map {
+	hash, err := NewMap(&MapSpec{
+		Type:       Hash,
+		KeySize:    5,
+		ValueSize:  4,
+		MaxEntries: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hash.Close() })
+	return hash
+}
+
 func TestMap(t *testing.T) {
 	m := createArray(t)
 	defer m.Close()
@@ -621,6 +636,38 @@ func TestMapLoadPinned(t *testing.T) {
 	c.Assert(pinned, qt.IsTrue)
 }
 
+func TestMapLoadReusePinned(t *testing.T) {
+	c := qt.New(t)
+
+	for _, typ := range []MapType{Array, Hash, DevMap, DevMapHash} {
+		t.Run(typ.String(), func(t *testing.T) {
+			if typ == DevMap {
+				testutils.SkipOnOldKernel(t, "4.14", "devmap")
+			}
+			if typ == DevMapHash {
+				testutils.SkipOnOldKernel(t, "5.4", "devmap_hash")
+			}
+			tmp := testutils.TempBPFFS(t)
+			spec := &MapSpec{
+				Name:       "pinmap",
+				Type:       typ,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+				Pinning:    PinByName,
+			}
+
+			m1, err := NewMapWithOptions(spec, MapOptions{PinPath: tmp})
+			c.Assert(err, qt.IsNil)
+			defer m1.Close()
+
+			m2, err := NewMapWithOptions(spec, MapOptions{PinPath: tmp})
+			c.Assert(err, qt.IsNil)
+			defer m2.Close()
+		})
+	}
+}
+
 func TestMapLoadPinnedUnpin(t *testing.T) {
 	tmp := testutils.TempBPFFS(t)
 	c := qt.New(t)
@@ -861,7 +908,7 @@ func TestNewMapInMapFromFD(t *testing.T) {
 	defer nested.Close()
 
 	// Do not copy this, use Clone instead.
-	another, err := NewMapFromFD(nested.FD())
+	another, err := NewMapFromFD(dupFD(t, nested.FD()))
 	if err != nil {
 		t.Fatal("Can't create a new nested map from an FD")
 	}
@@ -1182,8 +1229,7 @@ func TestMapGuessNonExistentKey(t *testing.T) {
 }
 
 func TestNotExist(t *testing.T) {
-	hash := createHash()
-	defer hash.Close()
+	hash := newHash(t)
 
 	var tmp uint32
 	err := hash.Lookup("hello", &tmp)
@@ -1214,8 +1260,7 @@ func TestNotExist(t *testing.T) {
 }
 
 func TestExist(t *testing.T) {
-	hash := createHash()
-	defer hash.Close()
+	hash := newHash(t)
 
 	if err := hash.Put("hello", uint32(21)); err != nil {
 		t.Errorf("Failed to put key/value pair into hash: %v", err)
@@ -1494,18 +1539,12 @@ func TestMapFromFD(t *testing.T) {
 
 	// If you're thinking about copying this, don't. Use
 	// Clone() instead.
-	m2, err := NewMapFromFD(m.FD())
+	m2, err := NewMapFromFD(dupFD(t, m.FD()))
 	testutils.SkipIfNotSupported(t, err)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Both m and m2 refer to the same fd now. Closing either of them will
-	// release the fd to the OS, which then might re-use that fd for another
-	// test. Once we close the second map we might close the re-used fd
-	// inadvertently, leading to spurious test failures.
-	// To avoid this we have to "leak" one of the maps.
-	m2.fd.Forget()
+	defer m2.Close()
 
 	var val uint32
 	if err := m2.Lookup(uint32(0), &val); err != nil {
@@ -1579,8 +1618,8 @@ func TestMapGetNextID(t *testing.T) {
 	var next MapID
 	var err error
 
-	hash := createHash()
-	defer hash.Close()
+	// Ensure there is at least one map on the system.
+	_ = newHash(t)
 
 	if next, err = MapGetNextID(MapID(0)); err != nil {
 		t.Fatal("Can't get next ID:", err)
@@ -1606,8 +1645,7 @@ func TestMapGetNextID(t *testing.T) {
 }
 
 func TestNewMapFromID(t *testing.T) {
-	hash := createHash()
-	defer hash.Close()
+	hash := newHash(t)
 
 	info, err := hash.Info()
 	testutils.SkipIfNotSupported(t, err)
@@ -1725,7 +1763,17 @@ func (cbv *customBenchValue) MarshalBinary() ([]byte, error) {
 	return buf, nil
 }
 
-func BenchmarkMarshalling(b *testing.B) {
+type benchKey struct {
+	id uint64
+}
+
+func (bk *benchKey) MarshalBinary() ([]byte, error) {
+	buf := make([]byte, 8)
+	internal.NativeEndian.PutUint64(buf, bk.id)
+	return buf, nil
+}
+
+func BenchmarkMarshaling(b *testing.B) {
 	newMap := func(valueSize uint32) *Map {
 		m, err := NewMap(&MapSpec{
 			Type:       Hash,
@@ -1747,7 +1795,7 @@ func BenchmarkMarshalling(b *testing.B) {
 	}
 	b.Cleanup(func() { m.Close() })
 
-	b.Run("reflection", func(b *testing.B) {
+	b.Run("ValueUnmarshalReflect", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -1761,7 +1809,21 @@ func BenchmarkMarshalling(b *testing.B) {
 		}
 	})
 
-	b.Run("custom", func(b *testing.B) {
+	b.Run("KeyMarshalReflect", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		var value benchValue
+
+		for i := 0; i < b.N; i++ {
+			err := m.Lookup(&key, unsafe.Pointer(&value))
+			if err != nil {
+				b.Fatal("Can't get key:", err)
+			}
+		}
+	})
+
+	b.Run("ValueBinaryUnmarshaler", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -1775,7 +1837,22 @@ func BenchmarkMarshalling(b *testing.B) {
 		}
 	})
 
-	b.Run("unsafe", func(b *testing.B) {
+	b.Run("KeyBinaryMarshaler", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		var key benchKey
+		var value customBenchValue
+
+		for i := 0; i < b.N; i++ {
+			err := m.Lookup(&key, unsafe.Pointer(&value))
+			if err != nil {
+				b.Fatal("Can't get key:", err)
+			}
+		}
+	})
+
+	b.Run("KeyValueUnsafe", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -1953,7 +2030,15 @@ func ExampleMap_perCPU() {
 // Note that using unsafe.Pointer is only marginally faster than
 // implementing Marshaler on the type.
 func ExampleMap_zeroCopy() {
-	hash := createHash()
+	hash, err := NewMap(&MapSpec{
+		Type:       Hash,
+		KeySize:    5,
+		ValueSize:  4,
+		MaxEntries: 10,
+	})
+	if err != nil {
+		panic(err)
+	}
 	defer hash.Close()
 
 	key := [5]byte{'h', 'e', 'l', 'l', 'o'}
@@ -1972,7 +2057,7 @@ func ExampleMap_zeroCopy() {
 	// Output: The value is: 23
 }
 
-func createHash() *Map {
+func ExampleMap_NextKey() {
 	hash, err := NewMap(&MapSpec{
 		Type:       Hash,
 		KeySize:    5,
@@ -1982,11 +2067,6 @@ func createHash() *Map {
 	if err != nil {
 		panic(err)
 	}
-	return hash
-}
-
-func ExampleMap_NextKey() {
-	hash := createHash()
 	defer hash.Close()
 
 	if err := hash.Put("hello", uint32(21)); err != nil {
@@ -2013,7 +2093,15 @@ func ExampleMap_NextKey() {
 // ExampleMap_Iterate demonstrates how to iterate over all entries
 // in a map.
 func ExampleMap_Iterate() {
-	hash := createHash()
+	hash, err := NewMap(&MapSpec{
+		Type:       Hash,
+		KeySize:    5,
+		ValueSize:  4,
+		MaxEntries: 10,
+	})
+	if err != nil {
+		panic(err)
+	}
 	defer hash.Close()
 
 	if err := hash.Put("hello", uint32(21)); err != nil {

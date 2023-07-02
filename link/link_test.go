@@ -12,10 +12,15 @@ import (
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/internal/sys"
 	"github.com/cilium/ebpf/internal/testutils"
+	"github.com/cilium/ebpf/internal/testutils/fdtrace"
 	"github.com/cilium/ebpf/internal/unix"
 
 	qt "github.com/frankban/quicktest"
 )
+
+func TestMain(m *testing.M) {
+	fdtrace.TestMain(m)
+}
 
 func TestRawLink(t *testing.T) {
 	cgroup, prog := mustCgroupFixtures(t)
@@ -55,11 +60,11 @@ func TestRawLink(t *testing.T) {
 func TestUnpinRawLink(t *testing.T) {
 	cgroup, prog := mustCgroupFixtures(t)
 	link, _ := newPinnedRawLink(t, cgroup, prog)
+	defer link.Close()
 
 	qt.Assert(t, link.IsPinned(), qt.IsTrue)
 
-	err := link.Unpin()
-	if err != nil {
+	if err := link.Unpin(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,6 +74,7 @@ func TestUnpinRawLink(t *testing.T) {
 func TestRawLinkLoadPinnedWithOptions(t *testing.T) {
 	cgroup, prog := mustCgroupFixtures(t)
 	link, path := newPinnedRawLink(t, cgroup, prog)
+	defer link.Close()
 
 	qt.Assert(t, link.IsPinned(), qt.IsTrue)
 
@@ -198,6 +204,36 @@ func testLink(t *testing.T, link Link, prog *ebpf.Program) {
 			if xdp.Ifindex == 0 {
 				t.Fatalf("Failed to get link XDP extra info")
 			}
+		}
+	})
+
+	type FDer interface {
+		FD() int
+	}
+
+	t.Run("from fd", func(t *testing.T) {
+		fder, ok := link.(FDer)
+		if !ok {
+			t.Skip("Link doesn't allow retrieving FD")
+		}
+
+		// We need to dup the FD since NewLinkFromFD takes
+		// ownership.
+		dupFD, err := unix.FcntlInt(uintptr(fder.FD()), unix.F_DUPFD_CLOEXEC, 1)
+		if err != nil {
+			t.Fatal("Can't dup link FD:", err)
+		}
+		defer unix.Close(dupFD)
+
+		newLink, err := NewLinkFromFD(dupFD)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatal("Can't create new link from dup link FD:", err)
+		}
+		defer newLink.Close()
+
+		if reflect.TypeOf(newLink) != reflect.TypeOf(link) {
+			t.Fatalf("Expected type %T, got %T", link, newLink)
 		}
 	})
 

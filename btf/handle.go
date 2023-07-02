@@ -1,13 +1,154 @@
 package btf
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 
+	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/sys"
 	"github.com/cilium/ebpf/internal/unix"
 )
+
+// Handle is a reference to BTF loaded into the kernel.
+type Handle struct {
+	fd *sys.FD
+
+	// Size of the raw BTF in bytes.
+	size uint32
+
+	needsKernelBase bool
+}
+
+// NewHandle loads BTF into the kernel.
+//
+// Returns ErrNotSupported if BTF is not supported.
+func NewHandle(spec *Spec) (*Handle, error) {
+	if spec.byteOrder != nil && spec.byteOrder != internal.NativeEndian {
+		return nil, fmt.Errorf("can't load %s BTF on %s", spec.byteOrder, internal.NativeEndian)
+	}
+
+	if spec.firstTypeID != 0 {
+		return nil, fmt.Errorf("split BTF can't be loaded into the kernel")
+	}
+
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	var stb *stringTableBuilder
+	if spec.strings != nil {
+		// Use the ELF string table as an estimate of the final
+		// string table size. We don't use the ELF string
+		// table since the types may have been changed in the meantime.
+		stb = newStringTableBuilder(spec.strings.Num())
+	}
+
+	err := marshalTypes(buf, spec.types, stb, kernelMarshalOptions())
+	if err != nil {
+		return nil, fmt.Errorf("marshal BTF: %w", err)
+	}
+
+	return newHandleFromRawBTF(buf.Bytes())
+}
+
+func newHandleFromRawBTF(btf []byte) (*Handle, error) {
+	if uint64(len(btf)) > math.MaxUint32 {
+		return nil, errors.New("BTF exceeds the maximum size")
+	}
+
+	attr := &sys.BtfLoadAttr{
+		Btf:     sys.NewSlicePointer(btf),
+		BtfSize: uint32(len(btf)),
+	}
+
+	fd, err := sys.BtfLoad(attr)
+	if err == nil {
+		return &Handle{fd, attr.BtfSize, false}, nil
+	}
+
+	if err := haveBTF(); err != nil {
+		return nil, err
+	}
+
+	logBuf := make([]byte, 64*1024)
+	attr.BtfLogBuf = sys.NewSlicePointer(logBuf)
+	attr.BtfLogSize = uint32(len(logBuf))
+	attr.BtfLogLevel = 1
+
+	// Up until at least kernel 6.0, the BTF verifier does not return ENOSPC
+	// if there are other verification errors. ENOSPC is only returned when
+	// the BTF blob is correct, a log was requested, and the provided buffer
+	// is too small.
+	_, ve := sys.BtfLoad(attr)
+	return nil, internal.ErrorWithLog("load btf", err, logBuf, errors.Is(ve, unix.ENOSPC))
+}
+
+// NewHandleFromID returns the BTF handle for a given id.
+//
+// Prefer calling [ebpf.Program.Handle] or [ebpf.Map.Handle] if possible.
+//
+// Returns ErrNotExist, if there is no BTF with the given id.
+//
+// Requires CAP_SYS_ADMIN.
+func NewHandleFromID(id ID) (*Handle, error) {
+	fd, err := sys.BtfGetFdById(&sys.BtfGetFdByIdAttr{
+		Id: uint32(id),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get FD for ID %d: %w", id, err)
+	}
+
+	info, err := newHandleInfoFromFD(fd)
+	if err != nil {
+		_ = fd.Close()
+		return nil, err
+	}
+
+	return &Handle{fd, info.size, info.IsModule()}, nil
+}
+
+// Spec parses the kernel BTF into Go types.
+//
+// base must contain type information for vmlinux if the handle is for
+// a kernel module. It may be nil otherwise.
+func (h *Handle) Spec(base *Spec) (*Spec, error) {
+	var btfInfo sys.BtfInfo
+	btfBuffer := make([]byte, h.size)
+	btfInfo.Btf, btfInfo.BtfSize = sys.NewSlicePointerLen(btfBuffer)
+
+	if err := sys.ObjInfo(h.fd, &btfInfo); err != nil {
+		return nil, err
+	}
+
+	if h.needsKernelBase && base == nil {
+		return nil, fmt.Errorf("missing base types")
+	}
+
+	return loadRawSpec(bytes.NewReader(btfBuffer), internal.NativeEndian, base)
+}
+
+// Close destroys the handle.
+//
+// Subsequent calls to FD will return an invalid value.
+func (h *Handle) Close() error {
+	if h == nil {
+		return nil
+	}
+
+	return h.fd.Close()
+}
+
+// FD returns the file descriptor for the handle.
+func (h *Handle) FD() int {
+	return h.fd.Int()
+}
+
+// Info returns metadata about the handle.
+func (h *Handle) Info() (*HandleInfo, error) {
+	return newHandleInfoFromFD(h.fd)
+}
 
 // HandleInfo describes a Handle.
 type HandleInfo struct {
@@ -59,7 +200,7 @@ func newHandleInfoFromFD(fd *sys.FD) (*HandleInfo, error) {
 	}, nil
 }
 
-// IsModule returns true if the BTF is for the kernel itself.
+// IsVmlinux returns true if the BTF is for the kernel itself.
 func (i *HandleInfo) IsVmlinux() bool {
 	return i.IsKernel && i.Name == "vmlinux"
 }

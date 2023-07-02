@@ -3,32 +3,44 @@ package testutils
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf/internal"
 )
 
-func MustKernelVersion() internal.Version {
-	v, err := internal.KernelVersion()
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
+const (
+	ignoreKernelVersionEnvVar = "EBPF_TEST_IGNORE_KERNEL_VERSION"
+)
 
 func CheckFeatureTest(t *testing.T, fn func() error) {
-	t.Helper()
+	checkFeatureTestError(t, fn())
+}
 
-	err := fn()
+func checkFeatureTestError(t *testing.T, err error) {
 	if err == nil {
 		return
 	}
 
 	var ufe *internal.UnsupportedFeatureError
 	if errors.As(err, &ufe) {
-		checkKernelVersion(t, ufe)
+		if ignoreKernelVersionCheck(t.Name()) {
+			t.Skipf("Ignoring error due to %s: %s", ignoreKernelVersionEnvVar, ufe.Error())
+		} else {
+			checkKernelVersion(t, ufe)
+		}
 	} else {
 		t.Error("Feature test failed:", err)
+	}
+}
+
+func CheckFeatureMatrix[K comparable](t *testing.T, fm internal.FeatureMatrix[K]) {
+	t.Helper()
+
+	for key, ft := range fm {
+		t.Run(ft.Name, func(t *testing.T) {
+			checkFeatureTestError(t, fm.Result(key))
+		})
 	}
 }
 
@@ -54,11 +66,10 @@ func checkKernelVersion(tb testing.TB, ufe *internal.UnsupportedFeatureError) {
 		return
 	}
 
-	kernelVersion := MustKernelVersion()
-	if ufe.MinimumVersion.Less(kernelVersion) {
+	if !isKernelLessThan(tb, ufe.MinimumVersion) {
 		tb.Helper()
-		tb.Fatalf("Feature '%s' isn't supported even though kernel %s is newer than %s",
-			ufe.Name, kernelVersion, ufe.MinimumVersion)
+		tb.Fatalf("Feature '%s' isn't supported even though kernel is newer than %s",
+			ufe.Name, ufe.MinimumVersion)
 	}
 }
 
@@ -78,6 +89,12 @@ func IsKernelLessThan(tb testing.TB, minVersion string) bool {
 		tb.Fatalf("Invalid version %s: %s", minVersion, err)
 	}
 
+	return isKernelLessThan(tb, minv)
+}
+
+func isKernelLessThan(tb testing.TB, minv internal.Version) bool {
+	tb.Helper()
+
 	if max := os.Getenv("CI_MAX_KERNEL_VERSION"); max != "" {
 		maxv, err := internal.NewVersion(max)
 		if err != nil {
@@ -89,5 +106,34 @@ func IsKernelLessThan(tb testing.TB, minVersion string) bool {
 		}
 	}
 
-	return MustKernelVersion().Less(minv)
+	return kernelVersion(tb).Less(minv)
+}
+
+func kernelVersion(tb testing.TB) internal.Version {
+	tb.Helper()
+
+	v, err := internal.KernelVersion()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return v
+}
+
+// ignoreKernelVersionCheck checks if test name should be ignored for kernel version check by checking against environment var EBPF_TEST_IGNORE_KERNEL_VERSION.
+// EBPF_TEST_IGNORE_KERNEL_VERSION is a comma (,) separated list of test names for which kernel version check should be ignored.
+//
+// eg: EBPF_TEST_IGNORE_KERNEL_VERSION=TestABC,TestXYZ
+func ignoreKernelVersionCheck(tName string) bool {
+	tNames := os.Getenv(ignoreKernelVersionEnvVar)
+	if tNames == "" {
+		return false
+	}
+
+	ignored := strings.Split(tNames, ",")
+	for _, n := range ignored {
+		if strings.TrimSpace(n) == tName {
+			return true
+		}
+	}
+	return false
 }

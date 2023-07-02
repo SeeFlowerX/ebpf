@@ -10,7 +10,13 @@ import (
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/testutils"
+	"github.com/cilium/ebpf/internal/testutils/fdtrace"
+	qt "github.com/frankban/quicktest"
 )
+
+func TestMain(m *testing.M) {
+	fdtrace.TestMain(m)
+}
 
 func TestCollectionSpecNotModified(t *testing.T) {
 	cs := CollectionSpec{
@@ -328,6 +334,52 @@ func TestCollectionSpecMapReplacements_SpecMismatch(t *testing.T) {
 	}
 }
 
+func TestCollectionRewriteConstants(t *testing.T) {
+	cs := &CollectionSpec{
+		Maps: map[string]*MapSpec{
+			".rodata": {
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+				Value: &btf.Datasec{
+					Vars: []btf.VarSecinfo{
+						{
+							Type: &btf.Var{
+								Name: "the_constant",
+								Type: &btf.Int{Size: 4},
+							},
+							Offset: 0,
+							Size:   4,
+						},
+					},
+				},
+				Contents: []MapKV{
+					{Key: uint32(0), Value: []byte{1, 1, 1, 1}},
+				},
+			},
+		},
+	}
+
+	err := cs.RewriteConstants(map[string]interface{}{
+		"fake_constant_one": uint32(1),
+		"fake_constant_two": uint32(2),
+	})
+	qt.Assert(t, err, qt.IsNotNil, qt.Commentf("RewriteConstants did not fail"))
+
+	var mErr *MissingConstantsError
+	if !errors.As(err, &mErr) {
+		t.Fatal("Error doesn't wrap MissingConstantsError:", err)
+	}
+	qt.Assert(t, mErr.Constants, qt.ContentEquals, []string{"fake_constant_one", "fake_constant_two"})
+
+	err = cs.RewriteConstants(map[string]interface{}{
+		"the_constant": uint32(0x42424242),
+	})
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, cs.Maps[".rodata"].Contents[0].Value, qt.ContentEquals, []byte{0x42, 0x42, 0x42, 0x42})
+}
+
 func TestCollectionSpec_LoadAndAssign_LazyLoading(t *testing.T) {
 	spec := &CollectionSpec{
 		Maps: map[string]*MapSpec{
@@ -539,6 +591,10 @@ func TestIncompleteLoadAndAssign(t *testing.T) {
 		t.Fatal("expected error loading invalid ProgramSpec")
 	}
 
+	if s.Valid == nil {
+		t.Fatal("expected valid prog to be non-nil")
+	}
+
 	if fd := s.Valid.FD(); fd != -1 {
 		t.Fatal("expected valid prog to have closed fd -1, got:", fd)
 	}
@@ -558,6 +614,25 @@ func BenchmarkNewCollection(b *testing.B) {
 	spec.Maps["array_of_hash_map"].InnerMap = spec.Maps["hash_map"]
 	for _, m := range spec.Maps {
 		m.Pinning = PinNone
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		coll, err := NewCollection(spec)
+		if err != nil {
+			b.Fatal(err)
+		}
+		coll.Close()
+	}
+}
+
+func BenchmarkNewCollectionManyProgs(b *testing.B) {
+	file := fmt.Sprintf("testdata/manyprogs-%s.elf", internal.ClangEndian)
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		b.Fatal(err)
 	}
 
 	b.ReportAllocs()

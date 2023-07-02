@@ -230,7 +230,7 @@ func TestProgramTestRunInterrupt(t *testing.T) {
 				runtime.Goexit()
 			},
 		}
-		_, _, err := prog.testRun(&opts)
+		_, _, err := prog.run(&opts)
 
 		errs <- err
 	}()
@@ -298,6 +298,16 @@ func TestProgramPin(t *testing.T) {
 		t.Error("Expected pinned program to have type SocketFilter, but got", prog.Type())
 	}
 
+	if haveObjName() == nil {
+		if prog.name != "test" {
+			t.Errorf("Expected program to have object name 'test', got '%s'", prog.name)
+		}
+	} else {
+		if prog.name != "program" {
+			t.Errorf("Expected program to have file name 'program', got '%s'", prog.name)
+		}
+	}
+
 	if !prog.IsPinned() {
 		t.Error("Expected IsPinned to be true")
 	}
@@ -361,13 +371,14 @@ func TestProgramVerifierOutputOnError(t *testing.T) {
 		t.Fatal("Expected program to be invalid")
 	}
 
-	var ve *VerifierError
-	if !errors.As(err, &ve) {
-		t.Fatal("Error does not contain a VerifierError")
+	ve, ok := err.(*VerifierError)
+	if !ok {
+		t.Fatal("NewProgram does return an unwrapped VerifierError")
 	}
 
 	if !strings.Contains(ve.Error(), "R0 !read_ok") {
-		t.Error("Unexpected verifier error contents:", ve)
+		t.Logf("%+v", ve)
+		t.Error("Missing verifier log in error summary")
 	}
 }
 
@@ -440,7 +451,7 @@ func TestProgramVerifierLogTruncated(t *testing.T) {
 		}
 		var ve *internal.VerifierError
 		if !errors.As(err, &ve) {
-			t.Error("Error is not a VerifierError")
+			t.Fatal("Error is not a VerifierError")
 		}
 		if !ve.Truncated {
 			t.Errorf("VerifierError is not truncated: %+v", ve)
@@ -611,11 +622,12 @@ func TestProgramFromFD(t *testing.T) {
 
 	// If you're thinking about copying this, don't. Use
 	// Clone() instead.
-	prog2, err := NewProgramFromFD(prog.FD())
+	prog2, err := NewProgramFromFD(dupFD(t, prog.FD()))
 	testutils.SkipIfNotSupported(t, err)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer prog2.Close()
 
 	// Name and type are supposed to be copied from program info.
 	if haveObjName() == nil && prog2.name != "test" {
@@ -625,17 +637,10 @@ func TestProgramFromFD(t *testing.T) {
 	if prog2.typ != SocketFilter {
 		t.Errorf("Expected program to have type SocketFilter, got '%s'", prog2.typ)
 	}
-
-	// Both programs refer to the same fd now. Closing either of them will
-	// release the fd to the OS, which then might re-use that fd for another
-	// test. Once we close the second map we might close the re-used fd
-	// inadvertently, leading to spurious test failures.
-	// To avoid this we have to "leak" one of the programs.
-	prog2.fd.Forget()
 }
 
 func TestHaveProgTestRun(t *testing.T) {
-	testutils.CheckFeatureTest(t, haveProgTestRun)
+	testutils.CheckFeatureTest(t, haveProgRun)
 }
 
 func TestProgramGetNextID(t *testing.T) {
@@ -747,18 +752,7 @@ func TestProgramAttachToKernel(t *testing.T) {
 	// See https://github.com/torvalds/linux/commit/290248a5b7d829871b3ea3c62578613a580a1744
 	testutils.SkipOnOldKernel(t, "5.5", "attach_btf_id")
 
-	haveTestmod := false
-	if !testutils.MustKernelVersion().Less(internal.Version{5, 11}) {
-		// See https://github.com/torvalds/linux/commit/290248a5b7d829871b3ea3c62578613a580a1744
-		testmod, err := btf.FindHandle(func(info *btf.HandleInfo) bool {
-			return info.IsModule() && info.Name == "bpf_testmod"
-		})
-		if err != nil && !errors.Is(err, btf.ErrNotFound) {
-			t.Fatal(err)
-		}
-		haveTestmod = testmod != nil
-		testmod.Close()
-	}
+	haveTestmod := haveTestmod(t)
 
 	tests := []struct {
 		attachTo    string
@@ -973,7 +967,7 @@ func mustSocketFilter(tb testing.TB) *Program {
 }
 
 // Print the full verifier log when loading a program fails.
-func ExampleProgram_verboseVerifierError() {
+func ExampleVerifierError_retrieveFullLog() {
 	_, err := NewProgram(&ProgramSpec{
 		Type: SocketFilter,
 		Instructions: asm.Instructions{
@@ -989,6 +983,40 @@ func ExampleProgram_verboseVerifierError() {
 		// few lines.
 		fmt.Printf("Verifier error: %+v\n", ve)
 	}
+}
+
+// VerifierLog understands a variety of formatting flags.
+func ExampleVerifierError() {
+	err := internal.ErrorWithLog(
+		"catastrophe",
+		syscall.ENOSPC,
+		[]byte("first\nsecond\nthird"),
+		false,
+	)
+
+	fmt.Printf("With %%s: %s\n", err)
+	err.Truncated = true
+	fmt.Printf("With %%v and a truncated log: %v\n", err)
+	fmt.Printf("All log lines: %+v\n", err)
+	fmt.Printf("First line: %+1v\n", err)
+	fmt.Printf("Last two lines: %-2v\n", err)
+
+	// Output: With %s: catastrophe: no space left on device: third (2 line(s) omitted)
+	// With %v and a truncated log: catastrophe: no space left on device: second: third (truncated, 1 line(s) omitted)
+	// All log lines: catastrophe: no space left on device:
+	// 	first
+	// 	second
+	// 	third
+	// 	(truncated)
+	// First line: catastrophe: no space left on device:
+	// 	first
+	// 	(2 line(s) omitted)
+	// 	(truncated)
+	// Last two lines: catastrophe: no space left on device:
+	// 	(1 line(s) omitted)
+	// 	second
+	// 	third
+	// 	(truncated)
 }
 
 // Use NewProgramWithOptions if you'd like to get the verifier output
@@ -1068,4 +1096,15 @@ func ExampleProgramSpec_Tag() {
 	} else {
 		fmt.Println("The programs are identical, tag is", tag)
 	}
+}
+
+func dupFD(tb testing.TB, fd int) int {
+	tb.Helper()
+
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 1)
+	if err != nil {
+		tb.Fatal("Can't dup fd:", err)
+	}
+
+	return dup
 }

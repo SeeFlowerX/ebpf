@@ -7,19 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/testutils"
+	qt "github.com/frankban/quicktest"
 )
-
-// vmlinux caches the result of parsing the running kernel's BTF.
-var vmlinux struct {
-	sync.Once
-	spec *Spec
-	err  error
-}
 
 func vmlinuxSpec(tb testing.TB) *Spec {
 	tb.Helper()
@@ -28,63 +21,52 @@ func vmlinuxSpec(tb testing.TB) *Spec {
 	// through sysfs"), which shipped in Linux 5.4.
 	testutils.SkipOnOldKernel(tb, "5.4", "vmlinux BTF in sysfs")
 
-	vmlinux.Do(func() {
-		vmlinux.spec, vmlinux.err = LoadKernelSpec()
-	})
-	if vmlinux.err != nil {
-		tb.Fatal(vmlinux.err)
+	spec, err := LoadSpec("/sys/kernel/btf/vmlinux")
+	if err != nil {
+		tb.Fatal(err)
 	}
-
-	return vmlinux.spec.Copy()
+	return spec.Copy()
 }
 
-// vmlinuxTestdata caches the result of reading and parsing a BTF blob from
-// testdata.
-var vmlinuxTestdata struct {
-	sync.Once
+type specAndRawBTF struct {
 	raw  []byte
 	spec *Spec
-	err  error
 }
 
-func doVMLinuxTestdata() {
+var vmlinuxTestdata = internal.Memoize(func() (specAndRawBTF, error) {
 	b, err := internal.ReadAllCompressed("testdata/vmlinux.btf.gz")
 	if err != nil {
-		vmlinuxTestdata.err = fmt.Errorf("uncompressing vmlinux testdata: %w", err)
-		return
+		return specAndRawBTF{}, err
 	}
-	vmlinuxTestdata.raw = b
 
-	s, err := loadRawSpec(bytes.NewReader(b), binary.LittleEndian, nil, nil)
+	spec, err := loadRawSpec(bytes.NewReader(b), binary.LittleEndian, nil)
 	if err != nil {
-		vmlinuxTestdata.err = fmt.Errorf("parsing vmlinux testdata types: %w", err)
-		return
+		return specAndRawBTF{}, err
 	}
-	vmlinuxTestdata.spec = s
-}
+
+	return specAndRawBTF{b, spec}, nil
+})
 
 func vmlinuxTestdataReader(tb testing.TB) *bytes.Reader {
 	tb.Helper()
 
-	vmlinuxTestdata.Do(doVMLinuxTestdata)
-
-	if err := vmlinuxTestdata.err; err != nil {
+	td, err := vmlinuxTestdata()
+	if err != nil {
 		tb.Fatal(err)
 	}
 
-	return bytes.NewReader(vmlinuxTestdata.raw)
+	return bytes.NewReader(td.raw)
 }
 
 func vmlinuxTestdataSpec(tb testing.TB) *Spec {
 	tb.Helper()
 
-	vmlinuxTestdata.Do(doVMLinuxTestdata)
-
-	if err := vmlinuxTestdata.err; err != nil {
+	td, err := vmlinuxTestdata()
+	if err != nil {
 		tb.Fatal(err)
 	}
 
-	return vmlinuxTestdata.spec.Copy()
+	return td.spec.Copy()
 }
 
 func parseELFBTF(tb testing.TB, file string) *Spec {
@@ -146,10 +128,7 @@ func TestTypeByNameAmbiguous(t *testing.T) {
 }
 
 func TestTypeByName(t *testing.T) {
-	spec, err := LoadSpecFromReader(vmlinuxTestdataReader(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	spec := vmlinuxTestdataSpec(t)
 
 	for _, typ := range []interface{}{
 		nil,
@@ -224,6 +203,50 @@ func TestTypeByName(t *testing.T) {
 	}
 }
 
+func TestSpecAdd(t *testing.T) {
+	i := &Int{
+		Name:     "foo",
+		Size:     2,
+		Encoding: Signed | Char,
+	}
+	pi := &Pointer{i}
+
+	s := NewSpec()
+	id, err := s.Add(pi)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, id, qt.Equals, TypeID(1), qt.Commentf("First non-void type doesn't get id 1"))
+
+	got, err := s.TypeByID(id)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, got, qt.Equals, pi)
+
+	id, err = s.Add(pi)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, id, qt.Equals, TypeID(1))
+
+	_, err = s.TypeID(i)
+	qt.Assert(t, err, qt.IsNotNil, qt.Commentf("Children mustn't be added"))
+
+	id, err = s.Add(i)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, id, qt.Equals, TypeID(2), qt.Commentf("Second type doesn't get id 2"))
+
+	id, err = s.Add(i)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, id, qt.Equals, TypeID(2), qt.Commentf("Adding a type twice returns different ids"))
+
+	typ, err := s.AnyTypeByName("foo")
+	qt.Assert(t, err, qt.IsNil, qt.Commentf("Add doesn't make named type queryable"))
+	qt.Assert(t, typ, qt.Equals, i)
+
+	id, err = s.Add(&Typedef{"baz", i})
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, id, qt.Equals, TypeID(3))
+
+	_, err = s.AnyTypeByName("baz")
+	qt.Assert(t, err, qt.IsNil)
+}
+
 func BenchmarkParseVmlinux(b *testing.B) {
 	rd := vmlinuxTestdataReader(b)
 	b.ReportAllocs()
@@ -234,7 +257,7 @@ func BenchmarkParseVmlinux(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		if _, err := loadRawSpec(rd, binary.LittleEndian, nil, nil); err != nil {
+		if _, err := loadRawSpec(rd, binary.LittleEndian, nil); err != nil {
 			b.Fatal("Can't load BTF:", err)
 		}
 	}
@@ -259,24 +282,6 @@ func TestParseCurrentKernelBTF(t *testing.T) {
 	}
 	t.Logf("%d strings total, %d distinct", len(spec.strings.strings), distinct)
 	t.Logf("Average string size: %.0f", float64(totalBytes)/float64(len(spec.strings.strings)))
-}
-
-func TestFindVMLinux(t *testing.T) {
-	file, err := findVMLinux()
-	testutils.SkipIfNotSupported(t, err)
-	if err != nil {
-		t.Fatal("Can't find vmlinux:", err)
-	}
-	defer file.Close()
-
-	spec, err := loadSpecFromELF(file)
-	if err != nil {
-		t.Fatal("Can't load BTF:", err)
-	}
-
-	if len(spec.namedTypes) == 0 {
-		t.Fatal("Empty kernel BTF")
-	}
 }
 
 func TestLoadSpecFromElf(t *testing.T) {
@@ -335,8 +340,12 @@ func TestLoadSpecFromElf(t *testing.T) {
 }
 
 func TestVerifierError(t *testing.T) {
-	btf, _ := newEncoder(kernelEncoderOptions, nil).Encode()
-	_, err := newHandleFromRawBTF(btf)
+	var buf bytes.Buffer
+	if err := marshalTypes(&buf, []Type{&Void{}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := newHandleFromRawBTF(buf.Bytes())
 	testutils.SkipIfNotSupported(t, err)
 	var ve *internal.VerifierError
 	if !errors.As(err, &ve) {
@@ -345,17 +354,6 @@ func TestVerifierError(t *testing.T) {
 
 	if ve.Truncated {
 		t.Fatalf("expected non-truncated verifier log: %v", err)
-	}
-}
-
-func TestLoadKernelSpec(t *testing.T) {
-	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); os.IsNotExist(err) {
-		t.Skip("/sys/kernel/btf/vmlinux not present")
-	}
-
-	_, err := LoadKernelSpec()
-	if err != nil {
-		t.Fatal("Can't load kernel spec:", err)
 	}
 }
 
@@ -386,6 +384,14 @@ func TestSpecCopy(t *testing.T) {
 			t.Fatalf("Type at index %d is not a copy: %T == %T", i, cpy.types[i], spec.types[i])
 		}
 	}
+}
+
+func TestSpecTypeByID(t *testing.T) {
+	_, err := NewSpec().TypeByID(0)
+	qt.Assert(t, err, qt.IsNil)
+
+	_, err = NewSpec().TypeByID(1)
+	qt.Assert(t, err, qt.ErrorIs, ErrNotFound)
 }
 
 func TestHaveBTF(t *testing.T) {
@@ -421,45 +427,45 @@ func ExampleSpec_TypeByName() {
 }
 
 func TestTypesIterator(t *testing.T) {
-	spec, err := LoadSpecFromReader(vmlinuxTestdataReader(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	spec := NewSpec()
 
-	if len(spec.types) < 1 {
-		t.Fatal("Not enough types")
-	}
-
-	// Assertion that 'iphdr' type exists within the spec
-	_, err = spec.AnyTypeByName("iphdr")
-	if err != nil {
-		t.Fatalf("Failed to find 'iphdr' type by name: %s", err)
-	}
-
-	found := false
-	count := 0
+	types := []Type{(*Void)(nil), &Int{Size: 4}, &Int{Size: 2}}
+	mustSpecAdd(t, spec, types...)
 
 	iter := spec.Iterate()
-	for iter.Next() {
-		if !found && iter.Type.TypeName() == "iphdr" {
-			found = true
+
+	// Add a type after calling Iterate() to make sure the iteration
+	// below doesn't pick it up.
+	mustSpecAdd(t, spec, &Const{types[0]})
+
+	for i, typ := range types {
+		if !iter.Next() {
+			t.Fatal("Iterator ended early at item", i)
 		}
-		count += 1
+
+		if iter.Type != typ {
+			t.Fatalf("Expected %p to match %p (%[1]T)", iter.Type, typ)
+		}
 	}
 
-	if l := len(spec.types); l != count {
-		t.Fatalf("Failed to iterate over all types (%d vs %d)", l, count)
+	if iter.Next() {
+		t.Fatalf("Iterator yielded too many items: %p (%[1]T)", iter.Type)
 	}
-	if !found {
-		t.Fatal("Cannot find 'iphdr' type")
+}
+
+func mustSpecAdd(t *testing.T, s *Spec, types ...Type) {
+	t.Helper()
+
+	for _, typ := range types {
+		_, err := s.Add(typ)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestLoadSplitSpecFromReader(t *testing.T) {
-	spec, err := LoadSpecFromReader(vmlinuxTestdataReader(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	spec := vmlinuxTestdataSpec(t)
 
 	f, err := os.Open("testdata/btf_testmod.btf")
 	if err != nil {
@@ -480,6 +486,11 @@ func TestLoadSplitSpecFromReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	typeByID, err := splitSpec.TypeByID(typeID)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, typeByID, qt.Equals, typ)
+
 	fnType := typ.(*Func)
 	fnProto := fnType.Type.(*FuncProto)
 
@@ -513,5 +524,37 @@ func TestLoadSplitSpecFromReader(t *testing.T) {
 		t.Fatalf("'bpf_testmod_init` type ID (%d) does not match copied spec's (%d)",
 			typeID, copyTypeID)
 	}
+}
 
+func TestFixupDatasecLayout(t *testing.T) {
+	ds := &Datasec{
+		Size: 0, // Populated by fixup.
+		Vars: []VarSecinfo{
+			{Type: &Var{Type: &Int{Size: 4}}},
+			{Type: &Var{Type: &Int{Size: 1}}},
+			{Type: &Var{Type: &Int{Size: 1}}},
+			{Type: &Var{Type: &Int{Size: 2}}},
+			{Type: &Var{Type: &Int{Size: 16}}},
+			{Type: &Var{Type: &Int{Size: 8}}},
+		},
+	}
+
+	qt.Assert(t, fixupDatasecLayout(ds), qt.IsNil)
+
+	qt.Assert(t, ds.Size, qt.Equals, uint32(40))
+	qt.Assert(t, ds.Vars[0].Offset, qt.Equals, uint32(0))
+	qt.Assert(t, ds.Vars[1].Offset, qt.Equals, uint32(4))
+	qt.Assert(t, ds.Vars[2].Offset, qt.Equals, uint32(5))
+	qt.Assert(t, ds.Vars[3].Offset, qt.Equals, uint32(6))
+	qt.Assert(t, ds.Vars[4].Offset, qt.Equals, uint32(16))
+	qt.Assert(t, ds.Vars[5].Offset, qt.Equals, uint32(32))
+}
+
+func BenchmarkSpecCopy(b *testing.B) {
+	spec := vmlinuxTestdataSpec(b)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		spec.Copy()
+	}
 }

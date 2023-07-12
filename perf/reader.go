@@ -99,6 +99,10 @@ func readRecord(rd io.Reader, rec *Record, buf []byte, overwritable bool) error 
 		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
 		return err
 
+	case linux.PERF_RECORD_COMM:
+		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
+		return err
+
 	default:
 		return &unknownEventError{header.Type}
 	}

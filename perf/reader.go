@@ -358,10 +358,10 @@ func (pr *Reader) Read() (Record, error) {
 	return r, pr.ReadInto(&r)
 }
 
-func (pr *Reader) ReadWithUnwindStack() (Record, error) {
+func (pr *Reader) ReadWithUnwindStack(show_regs bool) (Record, error) {
 	var r Record
 	r.UnwindStack = true
-	r.Regs = false
+	r.Regs = show_regs
 	return r, pr.ReadInto(&r)
 }
 

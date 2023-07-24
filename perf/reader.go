@@ -150,8 +150,8 @@ func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack, regs bool)
 	var data []byte
 	if unwind_stack {
 		// 先硬编码进行测试
-		// 16672 = 8 + 8 * 33 + 8 + 16384 + 8
-		data = make([]byte, sample.Size+16672)
+		// 8480 = 8 + 8 * 33 + 8 + 8192 + 8
+		data = make([]byte, sample.Size+8480)
 	} else if regs {
 		// 272 = 8 + 8 * 33
 		data = make([]byte, sample.Size+272)

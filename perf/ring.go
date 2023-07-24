@@ -119,7 +119,7 @@ func createPerfEvent(cpu, watermark int, overwritable, unwind_stack, regs, perf_
 
 	if unwind_stack {
 		attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
-		attr.Sample_stack_user = 16384
+		attr.Sample_stack_user = 8192
 		attr.Sample_regs_user = (1 << 33) - 1
 	} else if regs {
 		// 只获取寄存器信息

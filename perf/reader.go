@@ -44,7 +44,8 @@ type Record struct {
 	// The data submitted via bpf_perf_event_output.
 	// Due to a kernel bug, this can contain between 0 and 7 bytes of trailing
 	// garbage from the ring depending on the input sample's length.
-	RawSample []byte
+	RawSample  []byte
+	SampleSize uint32
 
 	// The number of samples which could not be output, since
 	// the ring buffer was full.
@@ -83,7 +84,7 @@ func readRecord(rd io.Reader, rec *Record, buf []byte, overwritable bool) error 
 	case unix.PERF_RECORD_SAMPLE:
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
-		rec.RawSample, err = readRawSample(rd, buf, rec.RawSample, rec.UnwindStack, rec.Regs)
+		err = readRawSample(rd, buf, rec, rec.UnwindStack, rec.Regs)
 		return err
 
 	case linux.PERF_RECORD_MMAP2:
@@ -138,15 +139,16 @@ func readLeftFull(rd io.Reader, sampleBuf []byte, header perfEventHeader) ([]byt
 	return buf, nil
 }
 
-func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack, regs bool) ([]byte, error) {
+func readRawSample(rd io.Reader, buf []byte, rec *Record, unwind_stack, regs bool) error {
 	buf = buf[:perfEventSampleSize]
 	if _, err := io.ReadFull(rd, buf); err != nil {
-		return nil, fmt.Errorf("read sample size: %w", err)
+		return fmt.Errorf("read sample size: %w", err)
 	}
 
 	sample := perfEventSample{
 		internal.NativeEndian.Uint32(buf),
 	}
+	rec.SampleSize = sample.Size
 	var data []byte
 	if unwind_stack {
 		// 先硬编码进行测试
@@ -156,17 +158,18 @@ func readRawSample(rd io.Reader, buf, sampleBuf []byte, unwind_stack, regs bool)
 		// 272 = 8 + 8 * 33
 		data = make([]byte, sample.Size+272)
 	} else {
-		if size := int(sample.Size); cap(sampleBuf) < size {
+		if size := int(sample.Size); cap(rec.RawSample) < size {
 			data = make([]byte, size)
 		} else {
-			data = sampleBuf[:size]
+			data = rec.RawSample[:size]
 		}
 	}
 
 	if _, err := io.ReadFull(rd, data); err != nil {
-		return nil, fmt.Errorf("read sample: %w", err)
+		return fmt.Errorf("read sample: %w", err)
 	}
-	return data, nil
+	rec.RawSample = data
+	return nil
 }
 
 // Reader allows reading bpf_perf_event_output

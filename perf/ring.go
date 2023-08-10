@@ -23,12 +23,12 @@ type perfEventRing struct {
 	ringReader
 }
 
-func newPerfEventRing(cpu, perCPUBuffer, watermark int, overwritable, unwind_stack, regs, perf_mmap bool) (*perfEventRing, error) {
+func newPerfEventRing(cpu, perCPUBuffer, watermark int, overwritable bool, eopts ExtraPerfOptions) (*perfEventRing, error) {
 	if watermark >= perCPUBuffer {
 		return nil, errors.New("watermark must be smaller than perCPUBuffer")
 	}
 
-	fd, err := createPerfEvent(cpu, watermark, overwritable, unwind_stack, regs, perf_mmap)
+	fd, err := createPerfEvent(cpu, watermark, overwritable, eopts)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (ring *perfEventRing) Close() {
 	ring.mmap = nil
 }
 
-func createPerfEvent(cpu, watermark int, overwritable, unwind_stack, regs, perf_mmap bool) (int, error) {
+func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptions) (int, error) {
 	if watermark == 0 {
 		watermark = 1
 	}
@@ -117,16 +117,16 @@ func createPerfEvent(cpu, watermark int, overwritable, unwind_stack, regs, perf_
 		Wakeup:      uint32(watermark),
 	}
 
-	if unwind_stack {
+	if eopts.UnwindStack {
 		attr.Sample_type |= linux.PERF_SAMPLE_STACK_USER | linux.PERF_SAMPLE_REGS_USER
-		attr.Sample_stack_user = 8192
-		attr.Sample_regs_user = (1 << 33) - 1
-	} else if regs {
+		attr.Sample_regs_user = eopts.Sample_regs_user
+		attr.Sample_stack_user = eopts.Sample_stack_user
+	} else if eopts.ShowRegs {
 		// 只获取寄存器信息
 		attr.Sample_type |= linux.PERF_SAMPLE_REGS_USER
-		attr.Sample_regs_user = (1 << 33) - 1
+		attr.Sample_regs_user = eopts.Sample_regs_user
 	}
-	if perf_mmap {
+	if eopts.PerfMmap {
 		attr.Bits |= linux.PerfBitMmap
 		attr.Bits |= linux.PerfBitComm
 		// // mmap_data 标志位用来获取不可执行的 mmap 相关数据 比如获取 vdex 之类的信息

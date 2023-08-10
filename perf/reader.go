@@ -49,10 +49,17 @@ type Record struct {
 
 	// The number of samples which could not be output, since
 	// the ring buffer was full.
-	LostSamples uint64
-	UnwindStack bool
-	Regs        bool
-	RecordType  uint32
+	LostSamples  uint64
+	ExtraOptions *ExtraPerfOptions
+	RecordType   uint32
+}
+
+type ExtraPerfOptions struct {
+	UnwindStack       bool
+	ShowRegs          bool
+	PerfMmap          bool
+	Sample_regs_user  uint64
+	Sample_stack_user uint32
 }
 
 // Read a record from a reader and tag it as being from the given CPU.
@@ -84,7 +91,7 @@ func readRecord(rd io.Reader, rec *Record, buf []byte, overwritable bool) error 
 	case unix.PERF_RECORD_SAMPLE:
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
-		err = readRawSample(rd, buf, rec, rec.UnwindStack, rec.Regs)
+		err = readRawSample(rd, buf, rec)
 		return err
 
 	case linux.PERF_RECORD_MMAP2:
@@ -139,7 +146,7 @@ func readLeftFull(rd io.Reader, sampleBuf []byte, header perfEventHeader) ([]byt
 	return buf, nil
 }
 
-func readRawSample(rd io.Reader, buf []byte, rec *Record, unwind_stack, regs bool) error {
+func readRawSample(rd io.Reader, buf []byte, rec *Record) error {
 	buf = buf[:perfEventSampleSize]
 	if _, err := io.ReadFull(rd, buf); err != nil {
 		return fmt.Errorf("read sample size: %w", err)
@@ -149,14 +156,17 @@ func readRawSample(rd io.Reader, buf []byte, rec *Record, unwind_stack, regs boo
 		internal.NativeEndian.Uint32(buf),
 	}
 	rec.SampleSize = sample.Size
+
+	// 后面这部分可以继续改进下
+	var SampleRegsSize uint32 = 8 + 8*33
+	var SampleStackSize uint32 = 8 + rec.ExtraOptions.Sample_stack_user + 8
+
 	var data []byte
-	if unwind_stack {
+	if rec.ExtraOptions.UnwindStack {
 		// 先硬编码进行测试
-		// 8480 = 8 + 8 * 33 + 8 + 8192 + 8
-		data = make([]byte, sample.Size+8480)
-	} else if regs {
-		// 272 = 8 + 8 * 33
-		data = make([]byte, sample.Size+272)
+		data = make([]byte, sample.Size+SampleRegsSize+SampleStackSize)
+	} else if rec.ExtraOptions.ShowRegs {
+		data = make([]byte, sample.Size+SampleRegsSize)
 	} else {
 		if size := int(sample.Size); cap(rec.RawSample) < size {
 			data = make([]byte, size)
@@ -219,11 +229,11 @@ type ReaderOptions struct {
 // per CPU buffer in bytes. It is rounded up to the nearest multiple
 // of the current page size.
 func NewReader(array *ebpf.Map, perCPUBuffer int) (*Reader, error) {
-	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, false, false, false)
+	return NewReaderWithOptions(array, perCPUBuffer, ReaderOptions{}, ExtraPerfOptions{})
 }
 
 // NewReaderWithOptions creates a new reader with the given options.
-func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, unwind_stack, regs, perf_mmap bool) (pr *Reader, err error) {
+func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions, eopts ExtraPerfOptions) (pr *Reader, err error) {
 	if perCPUBuffer < 1 {
 		return nil, errors.New("perCPUBuffer must be larger than 0")
 	}
@@ -258,7 +268,7 @@ func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions,
 	// but doesn't allow using a wildcard like -1 to specify "all CPUs".
 	// Hence we have to create a ring for each CPU.
 	for i := 0; i < nCPU; i++ {
-		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, opts.Overwritable, unwind_stack, regs, perf_mmap)
+		ring, err := newPerfEventRing(i, perCPUBuffer, opts.Watermark, opts.Overwritable, eopts)
 		if errors.Is(err, unix.ENODEV) {
 			// The requested CPU is currently offline, skip it.
 			rings = append(rings, nil)
@@ -356,23 +366,15 @@ func (pr *Reader) SetDeadline(t time.Time) {
 // Returns os.ErrDeadlineExceeded if a deadline was set.
 func (pr *Reader) Read() (Record, error) {
 	var r Record
-	r.UnwindStack = false
-	r.Regs = false
+	r.ExtraOptions = &ExtraPerfOptions{false, false, false, 0, 0}
+	// r.UnwindStack = false
+	// r.ShowRegs = false
 	return r, pr.ReadInto(&r)
 }
 
-func (pr *Reader) ReadWithUnwindStack(show_regs bool) (Record, error) {
+func (pr *Reader) ReadWithExtraOptions(opt *ExtraPerfOptions) (Record, error) {
 	var r Record
-	r.UnwindStack = true
-	r.Regs = show_regs
-	return r, pr.ReadInto(&r)
-}
-
-func (pr *Reader) ReadWithRegs() (Record, error) {
-	var r Record
-	r.UnwindStack = false
-	r.Regs = true
-
+	r.ExtraOptions = opt
 	return r, pr.ReadInto(&r)
 }
 

@@ -91,7 +91,8 @@ func readRecord(rd io.Reader, rec *Record, buf []byte, overwritable bool) error 
 	case unix.PERF_RECORD_SAMPLE:
 		rec.LostSamples = 0
 		// We can reuse buf here because perfEventHeaderSize > perfEventSampleSize.
-		err = readRawSample(rd, buf, rec)
+		// err = readRawSample(rd, buf, rec)
+		rec.RawSample, err = readLeftFull(rd, rec.RawSample, header)
 		return err
 
 	case linux.PERF_RECORD_MMAP2:

@@ -99,6 +99,26 @@ func (ring *perfEventRing) Close() {
 	ring.mmap = nil
 }
 
+const (
+	HW_BREAKPOINT_LEN_1 = 1
+	HW_BREAKPOINT_LEN_2 = 2
+	HW_BREAKPOINT_LEN_3 = 3
+	HW_BREAKPOINT_LEN_4 = 4
+	HW_BREAKPOINT_LEN_5 = 5
+	HW_BREAKPOINT_LEN_6 = 6
+	HW_BREAKPOINT_LEN_7 = 7
+	HW_BREAKPOINT_LEN_8 = 8
+)
+
+const (
+	HW_BREAKPOINT_EMPTY   uint32 = 0
+	HW_BREAKPOINT_R       uint32 = 1
+	HW_BREAKPOINT_W       uint32 = 2
+	HW_BREAKPOINT_RW      uint32 = HW_BREAKPOINT_R | HW_BREAKPOINT_W
+	HW_BREAKPOINT_X       uint32 = 4
+	HW_BREAKPOINT_INVALID uint32 = HW_BREAKPOINT_RW | HW_BREAKPOINT_X
+)
+
 func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptions) (int, error) {
 	if watermark == 0 {
 		watermark = 1
@@ -109,12 +129,27 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 		bits |= unix.PerfBitWriteBackward
 	}
 
-	attr := unix.PerfEventAttr{
-		Type:        unix.PERF_TYPE_SOFTWARE,
-		Config:      unix.PERF_COUNT_SW_BPF_OUTPUT,
-		Bits:        uint64(bits),
-		Sample_type: unix.PERF_SAMPLE_RAW,
-		Wakeup:      uint32(watermark),
+	var attr linux.PerfEventAttr
+
+	if eopts.BrkAddr != 0 {
+		attr = unix.PerfEventAttr{
+			Type:   linux.PERF_TYPE_BREAKPOINT,
+			Config: linux.PERF_COUNT_SW_CPU_CLOCK,
+			// Generate a notification every 1 event; we care about every event
+			Sample:  1,
+			Wakeup:  1,
+			Bp_type: HW_BREAKPOINT_X,
+			Ext1:    eopts.BrkAddr,
+			Ext2:    HW_BREAKPOINT_LEN_4,
+		}
+	} else {
+		attr = unix.PerfEventAttr{
+			Type:        unix.PERF_TYPE_SOFTWARE,
+			Config:      unix.PERF_COUNT_SW_BPF_OUTPUT,
+			Bits:        uint64(bits),
+			Sample_type: unix.PERF_SAMPLE_RAW,
+			Wakeup:      uint32(watermark),
+		}
 	}
 
 	if eopts.UnwindStack {

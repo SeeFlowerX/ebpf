@@ -12,6 +12,7 @@ import (
 	"github.com/cilium/ebpf/internal/sys"
 	"github.com/cilium/ebpf/internal/tracefs"
 	"github.com/cilium/ebpf/internal/unix"
+	linux "golang.org/x/sys/unix"
 )
 
 // Getting the terminology right is usually the hardest part. For posterity and
@@ -215,6 +216,53 @@ func unsafeStringPtr(str string) (unsafe.Pointer, error) {
 		return nil, err
 	}
 	return unsafe.Pointer(p), nil
+}
+
+func openPerfEvent() (*sys.FD, error) {
+	var bits uint64 = linux.PerfBitFreq
+	attr := unix.PerfEventAttr{
+		Type:   linux.PERF_TYPE_HARDWARE,
+		Config: linux.PERF_COUNT_HW_CPU_CYCLES,
+		Sample: 1,
+		Bits:   bits,
+	}
+	attr.Size = uint32(unsafe.Sizeof(attr))
+
+	fd, err := unix.PerfEventOpen(&attr, -1, 0, -1, unix.PERF_FLAG_FD_CLOEXEC)
+	if err != nil {
+		return nil, fmt.Errorf("opening perf event: %w", err)
+	}
+
+	return sys.NewFD(fd)
+}
+
+func PerfEvent(prog *ebpf.Program, opts *TracepointOptions) (Link, error) {
+	if prog == nil {
+		return nil, fmt.Errorf("prog cannot be nil: %w", errInvalidInput)
+	}
+	if prog.Type() != ebpf.PerfEvent {
+		return nil, fmt.Errorf("eBPF program type %s is not a PerfEvent: %w", prog.Type(), errInvalidInput)
+	}
+
+	fd, err := openPerfEvent()
+	if err != nil {
+		return nil, err
+	}
+
+	var cookie uint64
+	if opts != nil {
+		cookie = opts.Cookie
+	}
+
+	pe := newPerfEvent(fd, nil)
+
+	lnk, err := attachPerfEvent(pe, prog, cookie)
+	if err != nil {
+		pe.Close()
+		return nil, err
+	}
+
+	return lnk, nil
 }
 
 // openTracepointPerfEvent opens a tracepoint-type perf event. System-wide

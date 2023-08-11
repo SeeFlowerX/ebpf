@@ -110,15 +110,6 @@ const (
 	HW_BREAKPOINT_LEN_8 = 8
 )
 
-const (
-	HW_BREAKPOINT_EMPTY   uint32 = 0
-	HW_BREAKPOINT_R       uint32 = 1
-	HW_BREAKPOINT_W       uint32 = 2
-	HW_BREAKPOINT_RW      uint32 = HW_BREAKPOINT_R | HW_BREAKPOINT_W
-	HW_BREAKPOINT_X       uint32 = 4
-	HW_BREAKPOINT_INVALID uint32 = HW_BREAKPOINT_RW | HW_BREAKPOINT_X
-)
-
 func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptions) (int, error) {
 	if watermark == 0 {
 		watermark = 1
@@ -138,7 +129,7 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 			// Generate a notification every 1 event; we care about every event
 			Sample:  1,
 			Wakeup:  1,
-			Bp_type: HW_BREAKPOINT_X,
+			Bp_type: eopts.BrkType,
 			Ext1:    eopts.BrkAddr,
 			Ext2:    HW_BREAKPOINT_LEN_4,
 		}

@@ -115,17 +115,19 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 		watermark = 1
 	}
 
-	bits := unix.PerfBitWatermark
+	bits := linux.PerfBitWatermark
 	if overwritable {
-		bits |= unix.PerfBitWriteBackward
+		bits |= linux.PerfBitWriteBackward
 	}
 
 	var attr linux.PerfEventAttr
 
 	if eopts.BrkAddr != 0 {
 		attr = unix.PerfEventAttr{
-			Type:   linux.PERF_TYPE_BREAKPOINT,
-			Config: linux.PERF_COUNT_SW_CPU_CLOCK,
+			Type:        linux.PERF_TYPE_BREAKPOINT,
+			Config:      linux.PERF_COUNT_SW_CPU_CLOCK,
+			Bits:        uint64(bits),
+			Sample_type: linux.PERF_SAMPLE_ADDR | linux.PERF_SAMPLE_TID,
 			// Generate a notification every 1 event; we care about every event
 			Sample:  1,
 			Wakeup:  1,
@@ -135,10 +137,10 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 		}
 	} else {
 		attr = unix.PerfEventAttr{
-			Type:        unix.PERF_TYPE_SOFTWARE,
-			Config:      unix.PERF_COUNT_SW_BPF_OUTPUT,
+			Type:        linux.PERF_TYPE_SOFTWARE,
+			Config:      linux.PERF_COUNT_SW_BPF_OUTPUT,
 			Bits:        uint64(bits),
-			Sample_type: unix.PERF_SAMPLE_RAW,
+			Sample_type: linux.PERF_SAMPLE_RAW,
 			Wakeup:      uint32(watermark),
 		}
 	}

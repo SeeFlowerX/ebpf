@@ -122,7 +122,9 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 
 	var attr linux.PerfEventAttr
 
+	watch_pid := -1
 	if eopts.BrkAddr != 0 {
+		watch_pid = eopts.BrkPid
 		attr = unix.PerfEventAttr{
 			Type:        linux.PERF_TYPE_BREAKPOINT,
 			Config:      linux.PERF_COUNT_SW_CPU_CLOCK,
@@ -133,7 +135,8 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 			Wakeup:  1,
 			Bp_type: eopts.BrkType,
 			Ext1:    eopts.BrkAddr,
-			Ext2:    HW_BREAKPOINT_LEN_4,
+			Ext2:    eopts.BrkLen,
+			// Ext2:    HW_BREAKPOINT_LEN_4,
 		}
 	} else {
 		attr = unix.PerfEventAttr{
@@ -167,7 +170,7 @@ func createPerfEvent(cpu, watermark int, overwritable bool, eopts ExtraPerfOptio
 	}
 
 	attr.Size = uint32(unsafe.Sizeof(attr))
-	fd, err := unix.PerfEventOpen(&attr, -1, cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+	fd, err := unix.PerfEventOpen(&attr, watch_pid, cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
 	if err != nil {
 		return -1, fmt.Errorf("can't create perf event: %w", err)
 	}

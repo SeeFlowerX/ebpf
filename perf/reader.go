@@ -58,7 +58,9 @@ type ExtraPerfOptions struct {
 	UnwindStack       bool
 	ShowRegs          bool
 	PerfMmap          bool
+	BrkPid            int
 	BrkAddr           uint64
+	BrkLen            uint64
 	BrkType           uint32
 	Sample_regs_user  uint64
 	Sample_stack_user uint32
@@ -369,7 +371,7 @@ func (pr *Reader) SetDeadline(t time.Time) {
 // Returns os.ErrDeadlineExceeded if a deadline was set.
 func (pr *Reader) Read() (Record, error) {
 	var r Record
-	r.ExtraOptions = &ExtraPerfOptions{false, false, false, 0, 0, 0, 0}
+	r.ExtraOptions = &ExtraPerfOptions{false, false, false, -1, 0, 0, 0, 0, 0}
 	// r.UnwindStack = false
 	// r.ShowRegs = false
 	return r, pr.ReadInto(&r)

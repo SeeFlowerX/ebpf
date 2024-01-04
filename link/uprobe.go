@@ -69,8 +69,9 @@ type UprobeOptions struct {
 	// via `bpf_get_attach_cookie()`.
 	//
 	// Needs kernel 5.15+.
-	Cookie      uint64
-	UnwindStack bool
+	Cookie       uint64
+	RealFilePath string
+	UnwindStack  bool
 	// Prefix used for the event name if the uprobe must be attached using tracefs.
 	// The group name will be formatted as `<prefix>_<randomstr>`.
 	// The default empty string is equivalent to "ebpf" as the prefix.
@@ -301,7 +302,7 @@ func (ex *Executable) uprobe(symbol string, prog *ebpf.Program, opts *UprobeOpti
 	args := tracefs.ProbeArgs{
 		Type:         tracefs.Uprobe,
 		Symbol:       symbol,
-		Path:         ex.path,
+		Path:         opts.RealFilePath,
 		Offset:       offset,
 		Pid:          pid,
 		RefCtrOffset: opts.RefCtrOffset,

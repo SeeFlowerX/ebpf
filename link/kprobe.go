@@ -250,6 +250,9 @@ func pmuProbe(args tracefs.ProbeArgs) (*perfEvent, error) {
 			Config: config,              // Retprobe flag
 		}
 	case tracefs.Uprobe:
+		if strings.Contains(args.Path, "!") {
+			args.Path = strings.Split(args.Path, "!")[0]
+		}
 		sp, err = unsafeStringPtr(args.Path)
 		if err != nil {
 			return nil, err

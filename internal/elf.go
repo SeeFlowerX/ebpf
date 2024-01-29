@@ -1,13 +1,21 @@
 package internal
 
 import (
+	"archive/zip"
 	"debug/elf"
 	"fmt"
 	"io"
+	"io/fs"
+	"io/ioutil"
+	"strings"
 )
 
 type SafeELFFile struct {
 	*elf.File
+}
+
+type ZipFileReaderAt struct {
+	Data []byte
 }
 
 // NewSafeELFFile reads an ELF safely.
@@ -40,6 +48,7 @@ func NewSafeELFFile(r io.ReaderAt) (safe *SafeELFFile, err error) {
 // It works like NewSafeELFFile, with the exception that safe.Close will
 // close the underlying file.
 func OpenSafeELFFile(path string) (safe *SafeELFFile, err error) {
+	var file *elf.File
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -50,12 +59,59 @@ func OpenSafeELFFile(path string) (safe *SafeELFFile, err error) {
 		err = fmt.Errorf("reading ELF file panicked: %s", r)
 	}()
 
-	file, err := elf.Open(path)
+	//check is there "!" in path
+	if strings.Contains(path, "!") {
+		file, err = OpenZipELFFile(path)
+	} else {
+		file, err = elf.Open(path)
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	return &SafeELFFile{file}, nil
+}
+
+func NewZipFileReaderAt(file fs.File) (*ZipFileReaderAt, error) {
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ZipFileReaderAt{Data: data}, nil
+}
+
+func (z *ZipFileReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+	// 检查偏移量是否超出范围
+	if off >= int64(len(z.Data)) {
+		return 0, io.EOF
+	}
+
+	// 读取数据
+	n = copy(p, z.Data[off:])
+	return n, nil
+}
+
+func OpenZipELFFile(path string) (elfFile *elf.File, err error) {
+	// println("path", path)
+	apkFileStr := strings.Split(path, "!")
+	archive, err := zip.OpenReader(apkFileStr[0])
+	if err != nil {
+		return nil, err
+	}
+	f, err := archive.Open(strings.Split(apkFileStr[1], "@")[0])
+	if err != nil {
+		return nil, err
+	}
+	readerAt, err := NewZipFileReaderAt(f)
+	if err != nil {
+		return nil, err
+	}
+	elfFile, err = elf.NewFile(readerAt)
+	if err != nil {
+		return nil, err
+	}
+	return elfFile, nil
 }
 
 // Symbols is the safe version of elf.File.Symbols.
